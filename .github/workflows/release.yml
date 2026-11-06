@@ -1,0 +1,75 @@
+name: Release
+
+# Push a tag like v0.2.0 to trigger this: builds daemon + reporter for
+# every supported target and attaches them to a GitHub Release as
+# downloadable artifacts.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - package: daemon
+            target: aarch64-unknown-linux-gnu
+            name: daemon-aarch64-unknown-linux-gnu
+          - package: reporter
+            target: aarch64-unknown-linux-gnu
+            name: reporter-aarch64-unknown-linux-gnu
+          - package: reporter
+            target: x86_64-unknown-linux-gnu
+            name: reporter-x86_64-unknown-linux-gnu
+          - package: reporter
+            target: x86_64-pc-windows-gnu
+            name: reporter-x86_64-pc-windows-gnu
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross linker (aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install cross linker (windows/mingw)
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Build
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: cargo build --release --target ${{ matrix.target }} -p ${{ matrix.package }}
+
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf "$GITHUB_WORKSPACE/${{ matrix.name }}.tar.gz" "${{ matrix.package }}${{ matrix.ext }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.tar.gz
+          generate_release_notes: true

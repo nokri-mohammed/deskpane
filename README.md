@@ -110,6 +110,21 @@ Not built yet:
 - Running any of this on the actual Pi / real touchscreen — everything so
   far has been proven on dev hardware only.
 
+## Releases
+
+Pushing a tag like `v0.2.0` triggers [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which cross-builds `daemon` and `reporter` for every supported target
+(Pi/aarch64, Linux x86_64, Windows x86_64) and attaches them to a GitHub
+Release as downloadable `.tar.gz` artifacts:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Every push/PR to `main` also runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+(`cargo build` + `cargo test` for the whole workspace).
+
 ## Setup (once the above is built)
 
 1. Build and run `daemon/` — from the workspace root:
