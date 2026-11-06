@@ -1,0 +1,46 @@
+{
+  "python": {
+    "source": "svgl",
+    "url": "https://svgl.app/library/python.svg",
+    "file": "python.svg",
+    "bytes": 1126
+  },
+  "raspberry-pi": {
+    "source": "svgl",
+    "url": "https://svgl.app/library/raspberry_pi.svg",
+    "file": "raspberry-pi.svg",
+    "bytes": 5354
+  },
+  "monitor": {
+    "source": "lucide",
+    "url": "https://cdn.jsdelivr.net/npm/lucide-static/icons/monitor.svg",
+    "file": "monitor.svg",
+    "bytes": 421
+  },
+  "plus": {
+    "source": "lucide",
+    "url": "https://cdn.jsdelivr.net/npm/lucide-static/icons/plus.svg",
+    "file": "plus.svg",
+    "bytes": 328
+  },
+  "rust": {
+    "source": "svgl",
+    "url": "https://svgl.app/library/rust.svg",
+    "file": "rust.svg",
+    "bytes": 5425,
+    "dark_file": "rust_dark.svg",
+    "dark_url": "https://svgl.app/library/rust_dark.svg"
+  },
+  "windows": {
+    "source": "svgl",
+    "url": "https://svgl.app/library/windows.svg",
+    "file": "windows.svg",
+    "bytes": 297
+  },
+  "linux": {
+    "source": "svgl",
+    "url": "https://svgl.app/library/linux.svg",
+    "file": "linux.svg",
+    "bytes": 11498
+  }
+}
