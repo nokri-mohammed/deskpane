@@ -9,8 +9,10 @@ import math
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
+import traceback
 
 import pygame
 
@@ -26,6 +28,8 @@ FB_PATH = os.environ.get("FB_PATH") or detect_touchscreen_fb() or "/dev/fb1"
 # look) -- this is a dashboard, not an animation, so a low FPS costs nothing.
 FPS = 3
 TRANSITION_SECS = 0.35
+# repeat the same drawing error in the log at most once per this many seconds
+DRAW_ERROR_LOG_EVERY_SECS = 30
 EASE = 0.12
 
 BG = (16, 17, 21)
@@ -93,7 +97,7 @@ class NetworkMonitor:
     """Background thread: checks wlan0's own link/address/route state purely
     locally, no network traffic sent. This has to work precisely when the
     network itself is down, and it's independent of the daemon/reporter
-    pipeline — the Pi's own stats keep flowing to the daemon over loopback
+    pipeline: the Pi's own stats keep flowing to the daemon over loopback
     regardless of WiFi state, so a dead link here doesn't blank the
     dashboard, it just flags itself."""
 
@@ -390,6 +394,10 @@ def main():
     clock = pygame.time.Clock()
     t0 = time.time()
 
+    # last drawing error logged and when, so the same error is not logged every frame
+    last_draw_error = None
+    last_draw_error_logged_at = 0.0
+
     try:
         while True:
             now = time.time()
@@ -416,30 +424,59 @@ def main():
                     transition_until = now + TRANSITION_SECS
             last_taps = touch.taps
 
-            if showing_problem:
-                draw_network_problem(surface, fonts, net_monitor.reason, width, height)
-            else:
-                page %= total_pages
-                if page == 0:
-                    draw_overview(surface, fonts, devices, reader.connected, t0, now, width, height)
+            # Draw this frame. One bad device (odd text, huge numbers) must not
+            # kill the display loop, so any drawing error is caught, logged
+            # and replaced by a plain error screen; a tap still moves on.
+            try:
+                if showing_problem:
+                    draw_network_problem(surface, fonts, net_monitor.reason, width, height)
                 else:
-                    device = devices[page - 1]
-                    view = views.setdefault(device["device_id"], DeviceView())
-                    view.ease(device)
-                    view.render(surface, device, fonts, t0, now, width, height)
-                draw_page_dots(surface, page, total_pages, width, height)
+                    page %= total_pages
+                    if page == 0:
+                        draw_overview(surface, fonts, devices, reader.connected, t0, now, width, height)
+                    else:
+                        device = devices[page - 1]
+                        view = views.setdefault(device["device_id"], DeviceView())
+                        view.ease(device)
+                        view.render(surface, device, fonts, t0, now, width, height)
+                    draw_page_dots(surface, page, total_pages, width, height)
 
-                if not net_monitor.ok:
-                    draw_network_icon(surface, net_icon_center, CRIT)
+                    if not net_monitor.ok:
+                        draw_network_icon(surface, net_icon_center, CRIT)
 
-                if now < transition_until and prev_frame is not None:
-                    progress = 1 - max(0.0, (transition_until - now) / TRANSITION_SECS)
-                    frame_b.blit(surface, (0, 0))
-                    prev_frame.set_alpha(int(255 * (1 - progress)))
-                    frame_b.set_alpha(int(255 * progress))
-                    surface.fill(BG)
-                    surface.blit(prev_frame, (0, 0))
-                    surface.blit(frame_b, (0, 0))
+                    if now < transition_until and prev_frame is not None:
+                        progress = 1 - max(0.0, (transition_until - now) / TRANSITION_SECS)
+                        frame_b.blit(surface, (0, 0))
+                        prev_frame.set_alpha(int(255 * (1 - progress)))
+                        frame_b.set_alpha(int(255 * progress))
+                        surface.fill(BG)
+                        surface.blit(prev_frame, (0, 0))
+                        surface.blit(frame_b, (0, 0))
+            except Exception as error:
+                # log every 30 s, or sooner for a new error but at most once a
+                # second, so even an error text that changes every frame
+                # cannot flood the journal
+                error_text = repr(error)
+                is_new_error = error_text != last_draw_error
+                seconds_since_log = now - last_draw_error_logged_at
+                is_log_due = seconds_since_log >= DRAW_ERROR_LOG_EVERY_SECS
+                is_new_and_allowed = is_new_error and seconds_since_log >= 1.0
+                if is_log_due or is_new_and_allowed:
+                    print(f"dashboard: draw error on page {page}: {error_text}", file=sys.stderr, flush=True)
+                    traceback.print_exc(file=sys.stderr)
+                    last_draw_error = error_text
+                    last_draw_error_logged_at = now
+
+                # a tap on the network-problem screen exits, so do not offer "skip" there
+                if showing_problem:
+                    fallback_text = "Cannot draw this page"
+                else:
+                    fallback_text = "Cannot draw this page (tap to skip)"
+
+                # fixed text only here, so bad device data cannot break the error screen
+                surface.fill(BG)
+                msg = fonts["mid"].render(fallback_text, True, CRIT)
+                surface.blit(msg, (width // 2 - msg.get_width() // 2, height // 2 - 10))
 
             fb.flip()
             clock.tick(FPS)

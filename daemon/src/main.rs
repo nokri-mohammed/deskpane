@@ -3,7 +3,7 @@ use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use daemon::contract::{DeviceStatus, Report};
+use daemon::contract::{validate, DeviceStatus, Report};
 use daemon::services::broadcaster::Broadcaster;
 use daemon::services::udp::UdpSocketServer;
 use daemon::services::unix_socket::UnixSocketServer;
@@ -16,7 +16,7 @@ const DEFAULT_SOCKET_PATH: &str = "/tmp/pi-homelab-dashboard.sock";
 type SharedState = Arc<RwLock<HashMap<String, (Report, Instant)>>>;
 
 /// Transport the daemon listens on for incoming reports. UDP is the only
-/// one implemented today; Tcp and TcpTls are the planned next steps — add
+/// one implemented today; Tcp and TcpTls are the planned next steps; add
 /// a variant + an arm in `main`'s match, reusing `state` the same way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Protocol {
@@ -33,7 +33,7 @@ impl Protocol {
         match value.as_str() {
             "udp" => Protocol::Udp,
             other => panic!(
-                "unsupported PROTOCOL '{other}' — only 'udp' is implemented so far (tcp/tcp+tls planned)"
+                "unsupported PROTOCOL '{other}': only 'udp' is implemented so far (tcp/tcp+tls planned)"
             ),
         }
     }
@@ -59,6 +59,16 @@ async fn udp_server(mut udp_socket_server: UdpSocketServer, state: SharedState) 
                 continue;
             }
         };
+
+        // drop reports that break the contract limits (bad text, impossible numbers)
+        let checked = validate(&report);
+        match checked {
+            Ok(()) => {}
+            Err(reason) => {
+                eprintln!("daemon: rejected report from {peer}: {reason}");
+                continue;
+            }
+        }
 
         let device_id = report.device_id.clone();
         state.write().await.insert(device_id, (report, Instant::now()));

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use daemon::contract::{MAX_TEMP_C, MIN_TEMP_C};
 use sysinfo::{Components, Disks, System};
 
 /// Reads this machine's stats (CPU, memory, disk, temperature) via sysinfo.
@@ -126,7 +127,10 @@ fn pick_disk_gb(disks: &[DiskReading]) -> (f64, f64) {
     (total - available, total)
 }
 
-// prefers a sensor that looks like the CPU, else the first sensor, else 0.0
+/*
+ * prefers a sensor that looks like the CPU, else the first sensor, else 0.0;
+ * NaN or a reading outside -50..=150 also gives 0.0
+ */
 fn pick_cpu_temp(readings: &[TempReading]) -> f64 {
     let mut chosen: Option<f32> = None;
     for reading in readings {
@@ -150,10 +154,19 @@ fn pick_cpu_temp(readings: &[TempReading]) -> f64 {
 
     // some sensors report "not a number" when they have no reading
     if celsius.is_nan() {
-        0.0
-    } else {
-        celsius as f64
+        return 0.0;
     }
+
+    /*
+     * a reading outside the contract range is a broken sensor; the daemon
+     * would drop the whole report, so send "unavailable" (0.0) instead
+     */
+    let reading = celsius as f64;
+    if reading < MIN_TEMP_C || reading > MAX_TEMP_C {
+        return 0.0;
+    }
+
+    reading
 }
 
 #[cfg(test)]
@@ -239,6 +252,37 @@ mod tests {
         let readings = vec![temp("cpu", f32::NAN)];
 
         assert_eq!(pick_cpu_temp(&readings), 0.0);
+    }
+
+    #[test]
+    fn reading_above_150_gives_zero() {
+        // 255 is a common "sensor broken" value
+        let readings = vec![temp("cpu", 255.0)];
+
+        assert_eq!(pick_cpu_temp(&readings), 0.0);
+    }
+
+    #[test]
+    fn infinite_reading_gives_zero() {
+        let readings = vec![temp("cpu", f32::INFINITY)];
+
+        assert_eq!(pick_cpu_temp(&readings), 0.0);
+    }
+
+    #[test]
+    fn reading_below_minus_50_gives_zero() {
+        let readings = vec![temp("cpu", -273.0)];
+
+        assert_eq!(pick_cpu_temp(&readings), 0.0);
+    }
+
+    #[test]
+    fn readings_at_the_limits_are_kept() {
+        let cold = vec![temp("cpu", -50.0)];
+        let hot = vec![temp("cpu", 150.0)];
+
+        assert_eq!(pick_cpu_temp(&cold), -50.0);
+        assert_eq!(pick_cpu_temp(&hot), 150.0);
     }
 
     // the tests below read this real machine, so they only check the numbers are sane
