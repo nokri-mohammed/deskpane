@@ -15,21 +15,23 @@ the dashboard running on a Pi with a reporter on their PC, by following the docs
 | Versioning | none: crates at 0.1.0, no CHANGELOG, commits are not Conventional Commits |
 | GitHub repo | none yet, no remote |
 | Install for others | none: `scripts/provision-pi.sh` assumes the author's machine, systemd units only exist inside that script |
-| Docs | HARDWARE.md and RECOVERY.md are deep notes, not a guide; README says Waveshare, HARDWARE.md says Elegoo; README status is stale |
-| Private data | real hostname and LAN IP in `docs/CONTRACT.md`, a username in `docs/RECOVERY.md`; both are in git history |
-| Third-party binary | `pi/assets/tft35a.dtbo` comes from goodtft/LCD-show; its license is not checked |
-| Security | 2 HIGH findings open (T-002 bad report crashes the display, T-003 unbounded device table) |
+| Docs | HARDWARE.md and RECOVERY.md are deep notes, not a guide; display name fixed 2026-11-07 (Elegoo 3.5" SPI touchscreen, an LCD35 clone, in README.md and CLAUDE.md); README status updated in T-012 |
+| Private data | done: real hostname, LAN IP and username scrubbed 2026-11-07 (placeholders in `docs/CONTRACT.md` and `docs/RECOVERY.md`), git history rewritten (T-004) |
+| Third-party binary | done: `pi/assets/tft35a.dtbo` removed (goodtft/LCD-show has no license); `scripts/provision-pi.sh` downloads it from the vendor at install time, pinned to one commit and checked by SHA-256 |
+| Security | done: the 2 HIGH findings are fixed (T-002 report validation, commit 6c29acc; T-003 device table cap and expiry, commit 7fd7b50). MEDIUM items stay open (T-006) |
 
 ## Phase 1: clean up before anything is public
 
 1. Scrub private data (T-004): placeholders in CONTRACT.md and RECOVERY.md, then rewrite
-   history with `git filter-repo` so the values never reach GitHub. Free now, impossible after
+   history with `git filter-branch` so the values never reach GitHub. Free now, impossible after
    the first push. Owner: security-reviewer checks, chief of staff runs.
 2. Check the license of `tft35a.dtbo`. If redistribution is not allowed, remove it and have the
    installer download it from the vendor. Owner: chief of staff.
 3. Fix T-002 and T-003 (validation, capped and expiring device table). Owner: tdd-guide writes
    tests first, code-reviewer and security-reviewer review.
 4. Fix README facts: one display name (Elegoo LCD35 clone), current status, real setup steps.
+   Display name: done 2026-11-07 (CEO confirmed Elegoo; README.md and CLAUDE.md now match
+   HARDWARE.md). Current status: done in T-012. Real setup steps: still open (phase 4).
    Owner: doc-updater.
 
 ## Phase 2: versioning and changelog

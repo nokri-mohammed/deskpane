@@ -29,7 +29,7 @@ class TouchWatcher:
 
         self._available = True
         width, height = self._screen_size
-        # Raw touch-controller coordinates, not screen pixels — scaled below.
+        # Raw touch-controller coordinates, not screen pixels, scaled below.
         # Unverified on real hardware; recheck this mapping once the panel
         # is actually wired up (README: touch not yet confirmed on device).
         x_min, x_max = (abs_x.min, abs_x.max) if abs_x else (0, width)

@@ -32,7 +32,7 @@ OVERLAY_SHA256="601ea7056da5d7864648798fd3656b4205f01d6b9a6a8a5cfad6ca5601bbbe1e
 
 for bin in daemon reporter; do
   if [[ ! -f "$BIN_DIR/$bin" ]]; then
-    echo "error: $BIN_DIR/$bin not found — build it first:" >&2
+    echo "error: $BIN_DIR/$bin not found, build it first:" >&2
     echo "  cargo build --release --target aarch64-unknown-linux-gnu" >&2
     exit 1
   fi

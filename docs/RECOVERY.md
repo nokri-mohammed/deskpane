@@ -9,12 +9,12 @@ Updated 2026-11-06: the SPI touchscreen is now wired up and is the Pi's
 *only* framebuffer when no HDMI monitor is attached (`vc4` never registers
 one without a monitor present), so `getty@tty1` is active + enabled but
 **deliberately kept off that framebuffer** via `fbcon=map:1` in
-`/boot/firmware/cmdline.txt` — otherwise the kernel's text console and the
+`/boot/firmware/cmdline.txt`. Otherwise the kernel's text console and the
 dashboard app fight over the same device and both end up corrupted (this
 was fully diagnosed and reproduced on 2026-11-06; see `HARDWARE.md`).
 
 This means:
-- The touchscreen never shows the console/login prompt — only the
+- The touchscreen never shows the console/login prompt. Only the
   dashboard app ever draws to it. That's intentional.
 - **If you plug in an HDMI monitor for recovery, it won't show a console
   either**, because `fbcon=map:1` points the console at a nonexistent
@@ -22,13 +22,13 @@ This means:
   console on HDMI:
   1. SSH in if you can, and run `sudo con2fbmap 1 <hdmi-fb-number>`
      (check `/sys/class/graphics/fb*/name` for the one that *isn't*
-     `fb_ili9486`) — takes effect immediately, no reboot, but doesn't
+     `fb_ili9486`). This takes effect immediately, no reboot, but doesn't
      persist.
   2. Or, if you can't SSH in at all, remove `fbcon=map:1` from
      `/boot/firmware/cmdline.txt` on the SD card (another machine) and
-     reboot — the console will then bind to whichever fb comes up first,
+     reboot. The console will then bind to whichever fb comes up first,
      which could again be the touchscreen depending on probe order.
-- No autologin is configured — log in with the username and password you set when flashing the SD card
+- No autologin is configured. Log in with the username and password you set when flashing the SD card
   once you have a console.
 
 **So: plug in a monitor + USB keyboard, do the `con2fbmap`/cmdline step if
@@ -64,7 +64,7 @@ Once a USB-OTG cable is bought, the Pi Zero 2 W's data port can present
 itself as a wired network device to a laptop (`raspberrypi.local` over USB),
 giving SSH access with zero dependency on WiFi at all.
 
-**Not plug-and-play with the current image** — `/boot/firmware/config.txt`
+**Not plug-and-play with the current image**: `/boot/firmware/config.txt`
 currently has:
 
 ```
@@ -81,9 +81,9 @@ mode. To enable it later:
 
 ## Not yet covered
 
-- No backup WiFi profile (e.g. a phone hotspot) is stored — if the home
+- No backup WiFi profile (e.g. a phone hotspot) is stored. If the home
   router/SSID itself is the problem, local console access is still the only
   fallback until one is added.
-- No automated self-healing watchdog — recovery today is manual (console
+- No automated self-healing watchdog. Recovery today is manual (console
   login + `nmcli`), by choice, to avoid adding unattended code before it's
   needed.

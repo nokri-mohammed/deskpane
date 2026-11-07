@@ -71,9 +71,11 @@ these checks but still cannot be drawn shows an error screen for that page
 instead of stopping the display.
 
 The Pi stamps its own receive-time on each report and considers a device
-**offline** if no report has arrived in the last `OFFLINE_AFTER_S` seconds
-(default 15s in the daemon, `daemon/src/main.rs`). It drops off the page
-rotation until it reports again.
+**offline** if no report has arrived in the last 15 seconds (`OFFLINE_AFTER`
+in `daemon/src/main.rs`). The dashboard keeps the device in the page
+rotation and shows an offline page for it. The device stays there until it
+reports again, or until the daemon forgets it after 5 minutes of silence
+(see below).
 
 The daemon keeps at most **32 devices** (`MAX_DEVICES`). When the table is
 full, a report from a new `device_id` is dropped and logged as

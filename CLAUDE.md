@@ -5,8 +5,8 @@ work here.
 
 ## What it is
 
-A Raspberry Pi Zero 2 W with a Waveshare 3.5" SPI touchscreen shows live stats for every device
-on the homelab that reports in. Data flow:
+A Raspberry Pi Zero 2 W with an Elegoo 3.5" SPI touchscreen, an LCD35 (ILI9486 + XPT2046)
+clone, shows live stats for every device on the homelab that reports in. Data flow:
 
 ```
 reporter (each device) --UDP JSON--> daemon (Pi) --Unix socket, one JSON line/sec--> pi/dashboard.py
@@ -14,18 +14,22 @@ reporter (each device) --UDP JSON--> daemon (Pi) --Unix socket, one JSON line/se
 
 - `reporter/` (Rust, blocking): reads stats with `sysinfo`, sends one `Report` per packet every
   `--interval` seconds.
-- `daemon/` (Rust, tokio): keeps the latest report per device in memory, marks a device offline
-  after 15 s of silence, broadcasts a `Vec<DeviceStatus>` every second to Unix socket clients.
+- `daemon/` (Rust, tokio): validates each report, keeps the latest report per device in memory
+  (at most 32 devices), marks a device offline after 15 s of silence, forgets it after 5 minutes
+  of silence, broadcasts a `Vec<DeviceStatus>` every second to Unix socket clients.
 - `pi/` (Python, pygame): draws to the framebuffer (`/dev/fb1`, no X11), tap to change page.
-- `docs/CONTRACT.md` is the JSON wire shape. `daemon/src/contract.rs` holds the Rust types.
+- `docs/CONTRACT.md` is the JSON wire shape and its limits. `daemon/src/contract.rs` holds the
+  Rust types, `validate` and the limit constants.
 
 ## Layout
 
 ```
 daemon/src/
-  lib.rs              pub mod contract; pub mod services;
-  contract.rs         Report, DeviceStatus
-  main.rs             project logic: udp_server, broadcast_statuses, unix_socket_relay, main
+  lib.rs              pub mod contract; pub mod device_table; pub mod services;
+  contract.rs         Report, DeviceStatus, validate, limit constants (MAX_NAME_BYTES, ...)
+  device_table.rs     DeviceTable, pure insert_report (cap) and forget_silent (expiry)
+  main.rs             project logic: udp_server, forget_silent_devices, broadcast_statuses,
+                      unix_socket_relay, main; OFFLINE_AFTER, FORGET_AFTER, MAX_DEVICES
   services/
     broadcaster.rs    tokio broadcast channel that sends JSON
     udp.rs            UdpSocketServer (async, daemon) + UdpClient (blocking, reporter)
@@ -35,15 +39,15 @@ reporter/src/
   services/
     system_stats.rs   SystemStats (sysinfo wrapper) + pure pick_disk_gb / pick_cpu_temp
 pi/
-  dashboard.py        reads the socket, draws one device per page
+  dashboard.py        reads the socket, draws an overview page, then one device per page
   fb_display.py       framebuffer drawing
   touch.py            evdev tap watcher
 scripts/
   provision-pi.sh     pushes this repo onto a freshly flashed Pi
 docs/
-  CONTRACT.md         JSON wire shape
+  CONTRACT.md         JSON wire shape and report limits
   plans/              plans, one file per topic
-  backlog.md          task list
+  backlog.md          task list (the live list of open work)
   TEAM.md             team diagram and involvement log
 ```
 
@@ -54,14 +58,15 @@ docs/
 Use `~/.cargo/bin/cargo`. `/usr/bin/cargo` is 1.75 and too old for this workspace.
 
 ```bash
-~/.cargo/bin/cargo test --workspace                                   # 39 tests: daemon 25, reporter 14
+~/.cargo/bin/cargo test --workspace                                   # 94 tests: daemon 76, reporter 18
 ~/.cargo/bin/cargo build --release --target aarch64-unknown-linux-gnu # Pi build (linker in .cargo/config.toml)
 ~/.cargo/bin/cargo run -p daemon                                      # LISTEN_ADDR, SOCKET_PATH, PROTOCOL env vars
 ~/.cargo/bin/cargo run -p reporter -- run --daemon 127.0.0.1:8765 --device-id dev --label Dev
 ```
 
 The Windows target (`x86_64-pc-windows-gnu`) is not installed on this machine. CI and the release
-workflow build it. Pushing a `v*` tag runs `.github/workflows/release.yml`.
+workflow build it. `.github/workflows/release.yml` runs on every push to `main`: release-please
+keeps a release PR open, and merging it tags `vX.Y.Z` and builds the release binaries.
 
 ## Code style
 
@@ -107,8 +112,10 @@ Executives on this project (hub plugins `architecture`, `tdd`, `review`, `patter
 - **code-reviewer**: review Rust against `rust-patterns` (no shorthand, comments above, generic
   code in `services/`, project logic in `main.rs`). Check new services have edge-case tests.
 - **security-reviewer**: untrusted input enters in one place: UDP packets on `0.0.0.0:8765`,
-  parsed in `udp_server` in `daemon/src/main.rs`. There is no auth in v1. The Unix socket is local.
-  The known findings are under Open work.
+  parsed in `udp_server` in `daemon/src/main.rs`, checked by `validate` in
+  `daemon/src/contract.rs`, then stored through `daemon/src/device_table.rs`. There is no auth in
+  v1. The Unix socket is local. Open findings are in `docs/backlog.md` (T-006 MEDIUM items and
+  others).
 - **security-specialist**: owns firewall, ports, systemd hardening and the Pi provisioning in
   `scripts/provision-pi.sh`.
 - **doc-updater**: keep `README.md` (layout, status), `docs/CONTRACT.md` (wire shape) and this
@@ -119,20 +126,10 @@ Gap: there is no Python style skill yet for `pi/`.
 
 ## Open work
 
-From the security review (verdict: fine on a trusted LAN, not beyond it):
+The live list is `docs/backlog.md`. Do not copy items here.
 
-- HIGH: validate reports in the daemon before insert (string length caps, no control
-  characters, finite sane floats), and wrap drawing in `pi/dashboard.py` in try/except. A bad
-  report can crash the dashboard today.
-- HIGH: the device table has no cap and no expiry. Cap at about 32 devices, expire after 5
-  minutes of silence, shrink the UDP buffer to 1500 bytes.
-- MEDIUM: HMAC on reports, firewall udp/8765, move the socket to
-  `/run/pi-homelab-dashboard/daemon.sock` with 0600, systemd hardening, tighten the sudoers line
-  in `scripts/provision-pi.sh`.
-- LOW: replace the real hostname/IP in `docs/CONTRACT.md` and the username in
-  `docs/RECOVERY.md` with placeholders before publishing.
-- `unix_socket_relay` disconnects a client on `RecvError::Lagged`; it could skip and continue
-  instead.
+Done: the two HIGH security findings (T-002 report validation, commit 6c29acc; T-003 device table
+cap and expiry, commit 7fd7b50) and the private-data scrub with history rewritten (T-004).
 
 Not built yet: `reporter report` (one-shot), `reporter install` (systemd / Windows Service),
 TCP+mTLS transport, running on the real Pi and touchscreen.

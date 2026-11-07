@@ -63,3 +63,4 @@ flowchart TD
 | 2026-11-07 | tdd-guide | T-003: device table capped at 32, forgets after 5 min silence, 1500-byte UDP buffer (92 tests) |
 | 2026-11-07 | code-reviewer | Reviewed T-003: approved, four polish items; follow-ups T-015, T-016 |
 | 2026-11-07 | tdd-guide | T-003 polish: wording, log line, saturating time math, 2 more tests (94 total) |
+| 2026-11-07 | doc-updater | T-012 docs pass: CLAUDE.md, README status, CONTRACT.md offline sentence, release plan rows, em dashes removed |
