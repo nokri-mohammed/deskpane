@@ -14,11 +14,12 @@
 - T-019 install.sh remembers --no-display/--no-reporter from the last install so upgrades keep them: [todo 2026-11-07]
 - T-020 touch.py finds the touchscreen by name instead of always /dev/input/event0: [todo 2026-11-07]
 - T-021 install.sh copies uninstall.sh into /opt so uninstall works without the bundle: [todo 2026-11-07]
+- T-022 Vision and name: display with views (stats, tasks via MCP/AI agent, canvas from a web portal); pick a name that fits, rename before first publish: [todo 2026-11-07, in-progress 2026-11-07 architect]
 - T-006 Security MEDIUM items (HMAC, firewall, sudoers, separate daemon user, touchscreen-only udev rule, unbind-fbcon sandbox, precise uninstall, bundle signing): [todo 2026-11-07]
 
 ## In Progress
 
-- T-007 Open-source release v0.1.0 (plans: docs/plans/2026-11-07-open-source-release.md, docs/plans/2026-11-07-release-artifacts.md): [todo 2026-11-07, in-progress 2026-11-07 chief-of-staff (phases 1+2 done), phase 1 approved 2026-11-07 security-reviewer, phase 2 reviewed + phase 3 designed 2026-11-07 architect, CEO approved phase 3 decisions 2026-11-07, phase 3 in-progress architect, phase 4 in-progress doc-updater, phase 3 done 2026-11-07]
+- T-007 Open-source release v0.1.0 (plans: docs/plans/2026-11-07-open-source-release.md, docs/plans/2026-11-07-release-artifacts.md): [todo 2026-11-07, in-progress 2026-11-07 chief-of-staff (phases 1+2 done), phase 1 approved 2026-11-07 security-reviewer, phase 2 reviewed + phase 3 designed 2026-11-07 architect, CEO approved phase 3 decisions 2026-11-07, phase 3 in-progress architect, phase 4 first pass done 2026-11-07, second pass waits on the project name (T-022), phase 3 done 2026-11-07]
 
 ## Blocked
 
