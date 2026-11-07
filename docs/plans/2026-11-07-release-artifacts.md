@@ -1,0 +1,310 @@
+# Plan: release artifacts (T-007 phase 3)
+
+Status: draft, waiting for CEO approval. Owner: architect designs, security-specialist reviews
+`install.sh` and the systemd units, chief of staff implements.
+
+Parent plan: `docs/plans/2026-11-07-open-source-release.md`.
+
+Goal: a release page with five downloads that a newcomer can use without cloning the repo:
+one bundle for the Pi, three reporter downloads, and a checksum file.
+
+## Current state
+
+- `release.yml` builds four bare binaries and uploads each as its own `.tar.gz` to an already
+  published GitHub Release. No Python dashboard, no units, no installer, no checksums.
+- The three systemd units (plus `unbind-fbcon.service`) exist only as heredocs inside
+  `scripts/provision-pi.sh`, templated with the SSH user's name and home directory.
+- `provision-pi.sh` downloads the display overlay from a pinned goodtft/LCD-show commit and
+  checks its SHA-256, because the vendor repo has no license and we may not redistribute it.
+- The daemon and dashboard share a socket in `/tmp`. Nothing runs as a dedicated user.
+- `cargo fmt --check` reports 8 diffs today (line wrapping only). `cargo clippy` reports 3
+  warnings, all caused by the house style: `redundant_field_names`, `needless_late_init`,
+  `needless_bool_assign`.
+
+## Artifacts
+
+| File | Contents | Built on |
+|---|---|---|
+| `pi-homelab-dashboard-pi-aarch64.tar.gz` | the Pi bundle below | `ubuntu-24.04-arm` |
+| `reporter-linux-x86_64.tar.gz` | `reporter`, `LICENSE`, `README.txt` | `ubuntu-latest` |
+| `reporter-linux-aarch64.tar.gz` | `reporter`, `LICENSE`, `README.txt` | `ubuntu-24.04-arm` |
+| `reporter-windows-x86_64.zip` | `reporter.exe`, `LICENSE`, `README.txt` | `ubuntu-latest` (mingw cross) |
+| `SHA256SUMS` | `sha256sum` lines for the four files above | publish job |
+
+File names carry no version, so docs can link
+`https://github.com/<owner>/pi-homelab-dashboard/releases/latest/download/<file>` and the link
+never goes stale. The version lives in the top-level directory inside each archive and in a
+`VERSION` file.
+
+Linux binaries are built for the `*-unknown-linux-musl` targets (static, no glibc
+dependency). A glibc build on `ubuntu-latest` links against glibc 2.39, which can refuse to
+start on Raspberry Pi OS Bookworm (glibc 2.36), Debian 11 or Ubuntu 20.04. The reporter is
+meant to run on every machine in the homelab, so "runs anywhere" matters more than the small
+size and speed cost of musl. The aarch64 builds run on GitHub's native arm64 runner (free for
+public repos), so no cross linker is needed.
+
+## Pi bundle layout
+
+```
+pi-homelab-dashboard-0.1.0-pi-aarch64/
+  VERSION                         0.1.0
+  LICENSE
+  README.txt                      three lines: verify, extract, sudo ./install.sh
+  install.sh
+  uninstall.sh
+  overlay.env                     OVERLAY_URL and OVERLAY_SHA256 (no overlay file)
+  bin/
+    daemon
+    reporter                      the Pi reports its own stats, as today
+  dashboard/
+    dashboard.py
+    fb_display.py
+    touch.py
+  systemd/
+    homelab-daemon.service
+    homelab-dashboard.service
+    homelab-reporter.service
+    unbind-fbcon.service
+  config/
+    env.example                   copied to /etc/pi-homelab-dashboard/env on first install
+```
+
+The parent plan lists "overlay" in the bundle. That is a mistake: the overlay cannot be
+redistributed, so the bundle carries only its pinned URL and hash, and `install.sh` downloads
+it on the Pi.
+
+## Repo layout changes
+
+```
+deploy/
+  systemd/
+    homelab-daemon.service
+    homelab-dashboard.service
+    homelab-reporter.service
+    unbind-fbcon.service
+  overlay.env                     single source of the overlay URL and hash
+  env.example
+  install.sh
+  uninstall.sh
+scripts/
+  package-pi-bundle.sh            builds the bundle tarball from a built daemon + reporter
+  provision-pi.sh                 becomes: package, scp the tarball, ssh sudo install.sh
+```
+
+One source of truth for each thing. `provision-pi.sh` stops writing units and boot config
+itself; it builds the same bundle CI builds and runs the same `install.sh` on the Pi. That
+way the developer path and the user path cannot drift, and every provisioning run tests the
+installer.
+
+## Static systemd units
+
+The units stop being templates. Instead of the SSH user and home directory they use a system
+user and fixed paths:
+
+| Item | Value |
+|---|---|
+| Install root | `/opt/pi-homelab-dashboard/releases/<version>/`, with `/opt/pi-homelab-dashboard/current` a symlink to the active release |
+| Service user | `pi-homelab` (system user, no login shell, groups `video` and `input` for `/dev/fb1` and `/dev/input/event*`) |
+| Config | `/etc/pi-homelab-dashboard/env`, read with `EnvironmentFile=`, never overwritten by an upgrade |
+| Socket | `/run/pi-homelab-dashboard/daemon.sock`, created through `RuntimeDirectory=pi-homelab-dashboard` on the daemon unit, set in both units with `Environment=SOCKET_PATH=...` |
+
+`homelab-daemon.service`: `User=pi-homelab`, `ExecStart=/opt/pi-homelab-dashboard/current/bin/daemon`,
+`EnvironmentFile=-/etc/pi-homelab-dashboard/env`, `RuntimeDirectory=pi-homelab-dashboard`,
+`RuntimeDirectoryMode=0750`, `Restart=always`.
+
+`homelab-dashboard.service`: same user, `ExecStart=/usr/bin/python3 /opt/pi-homelab-dashboard/current/dashboard/dashboard.py`,
+`After=` and `Wants=homelab-daemon.service unbind-fbcon.service`, `Restart=on-failure` (tap to
+exit stays exited, as today).
+
+`homelab-reporter.service`: same user,
+`ExecStart=/opt/pi-homelab-dashboard/current/bin/reporter run --daemon 127.0.0.1:8765 --device-id ${DEVICE_ID} --label ${LABEL} --interval 2`.
+systemd expands `${VAR}` from the env file as one word, so a label with spaces works.
+
+`unbind-fbcon.service`: unchanged from today, runs as root.
+
+Hardening (T-006, security-specialist) slots into these files later: `NoNewPrivileges=yes`,
+`ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`. Note that `PrivateTmp` would break
+the current `/tmp` socket, which is one more reason the socket moves to `/run` in this phase.
+
+`env.example`:
+
+```
+# device id and label the Pi's own reporter uses on the dashboard
+DEVICE_ID=pi-zero
+LABEL=Raspberry Pi
+# where the daemon listens for reports from other machines
+LISTEN_ADDR=0.0.0.0:8765
+```
+
+## What install.sh does
+
+Run on the Pi as `sudo ./install.sh` from inside the extracted bundle. It is idempotent:
+running it again with a newer bundle is the upgrade path. Written in bash with
+`set -euo pipefail`, checked with shellcheck in CI.
+
+1. Preflight. Stop with a clear message if: not root; `uname -m` is not `aarch64` (tell the
+   user to flash Raspberry Pi OS Lite 64-bit); `/boot/firmware/config.txt` is missing
+   (Bookworm or later is required); the bundle directory is incomplete.
+2. Flags: `--no-display` (headless: skip overlay, boot config, `unbind-fbcon` and the
+   dashboard unit), `--no-reporter` (skip the Pi's own reporter), `--device-id ID` and
+   `--label TEXT` (written to the env file on first install only). No flags means the full
+   install.
+3. Packages: `apt-get update` and `apt-get install -y python3-pygame python3-evdev curl
+   ca-certificates`.
+4. User: create `pi-homelab` with `useradd --system --no-create-home --shell
+   /usr/sbin/nologin`, then add it to `video` and `input`. Skip if it exists.
+5. Files: copy the bundle to `/opt/pi-homelab-dashboard/releases/<version>/`, owned by root,
+   binaries 0755, Python 0644. The service user can read and run but not modify them. Switch
+   `current` atomically (`ln -sfn` to a temp name, then `mv -T`).
+6. Config: create `/etc/pi-homelab-dashboard/env` from `env.example` (0644, root) only if it
+   does not exist, applying `--device-id` and `--label`.
+7. Overlay (skipped with `--no-display`):
+   1. Source `overlay.env`.
+   2. If `/boot/firmware/overlays/tft35a.dtbo` already matches `OVERLAY_SHA256`, skip the
+      download.
+   3. Otherwise download `OVERLAY_URL` to a `mktemp` file with `curl -fsSL --proto '=https'
+      --tlsv1.2`, check it with `sha256sum -c`, and abort on a mismatch without touching
+      `/boot`.
+   4. `install -m 0644` it into `/boot/firmware/overlays/tft35a.dtbo`.
+8. Boot config (skipped with `--no-display`): before the first change, copy `config.txt`
+   and `cmdline.txt` to `*.pi-homelab.bak`. Append the `dtoverlay=tft35a:rotate=0` block if
+   no `dtoverlay=tft35a` line exists. Append ` fbcon=map:1` to the single line of
+   `cmdline.txt` if missing, keeping it on one line. Remember whether a reboot is needed.
+9. Units: `install -m 0644` the unit files into `/etc/systemd/system/`, `systemctl
+   daemon-reload`, `systemctl enable` the units, then `restart` them. A restart, not
+   `start`, so an upgrade picks up the new binaries.
+10. Clean up: keep the current and previous release under `releases/`, delete older ones.
+    The previous release is the rollback: point `current` back at it and restart.
+11. Report: print the version, the `systemctl status` summary, the reboot hint if step 8
+    changed anything, and the command to run on other machines:
+    `reporter run --daemon <this Pi's IP>:8765 --device-id <id> --label <name>`.
+
+`uninstall.sh` stops and disables the units, removes the unit files and
+`/opt/pi-homelab-dashboard`. By default it keeps `/etc/pi-homelab-dashboard`, the
+`pi-homelab` user, the overlay and the boot config edits. `--purge` removes the config and
+the user and restores the `.pi-homelab.bak` files.
+
+The documented install never pipes curl into bash: download the bundle and `SHA256SUMS`, run
+`sha256sum -c --ignore-missing SHA256SUMS`, extract, then run `sudo ./install.sh`.
+
+## Workflow changes
+
+### ci.yml (every push to main and every PR)
+
+| Job | Steps |
+|---|---|
+| `fmt` | `cargo fmt --all --check` |
+| `clippy` | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
+| `test` | `cargo build --workspace --all-targets --locked`, `cargo test --workspace --locked` |
+| `scripts` | `shellcheck deploy/install.sh deploy/uninstall.sh scripts/*.sh`, `python3 -m py_compile pi/*.py` |
+| `package` | build the daemon and reporter for `aarch64-unknown-linux-musl` on `ubuntu-24.04-arm`, run `scripts/package-pi-bundle.sh`, list the tarball contents. Catches packaging breakage on the PR, not on release day |
+
+Before turning on `fmt`, run `cargo fmt --all` once as a separate `style:` commit (it does
+not bump the version). The current diffs are only line wrapping and do not fight the house
+style.
+
+The clippy allow list goes in `Cargo.toml`, not on the CI command line, so a local `cargo
+clippy` and CI agree:
+
+```toml
+# lints that fight the rust-patterns house style (explicit match, no shorthand)
+[workspace.lints.clippy]
+redundant_field_names = "allow"
+needless_late_init = "allow"
+needless_bool_assign = "allow"
+single_match = "allow"
+manual_unwrap_or = "allow"
+manual_unwrap_or_default = "allow"
+question_mark = "allow"
+manual_map = "allow"
+match_like_matches_macro = "allow"
+```
+
+Both crates get `[lints] workspace = true`. The first three fire today (measured with clippy
+0.1.99). The others are in the parent plan or fire on patterns the house style requires
+(`match` that returns early instead of `?`, `match` on an `Option` instead of `.map`). Every
+other default lint stays on and is an error in CI.
+
+### release.yml (push to main)
+
+```
+release-please --(release_created)--> build-pi-bundle    --\
+                                      build-reporter (x3) ----> publish
+```
+
+- Top level: `permissions: contents: read` and
+  `concurrency: { group: release-please, cancel-in-progress: false }`, so two quick pushes to
+  main cannot race on the release PR.
+- `release-please`: job-level `contents: write` and `pull-requests: write`. Outputs
+  `release_created`, `tag_name` and `version`.
+- `build-pi-bundle` (`ubuntu-24.04-arm`, `contents: read`): checkout at `tag_name`, install
+  `musl-tools`, build daemon and reporter with `--release --locked --target
+  aarch64-unknown-linux-musl`, run `scripts/package-pi-bundle.sh <version>`,
+  `actions/upload-artifact`.
+- `build-reporter` matrix (`contents: read`):
+
+  | Target | Runner | Archive |
+  |---|---|---|
+  | `x86_64-unknown-linux-musl` | `ubuntu-latest` + `musl-tools` | `reporter-linux-x86_64.tar.gz` |
+  | `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` + `musl-tools` | `reporter-linux-aarch64.tar.gz` |
+  | `x86_64-pc-windows-gnu` | `ubuntu-latest` + `gcc-mingw-w64-x86-64` | `reporter-windows-x86_64.zip` (made with `zip`) |
+
+  Each archive has one top-level directory `reporter-<version>-<os>-<arch>/`. Uploaded with
+  `actions/upload-artifact`, not to the release.
+- `publish` (`needs` both build jobs, `contents: write`): `actions/download-artifact` with
+  `merge-multiple: true`, then `sha256sum *.tar.gz *.zip > SHA256SUMS`, then one
+  `gh release upload <tag> * --clobber`, then `gh release edit <tag> --draft=false`.
+
+The release is created as a draft (see review finding 3), so nobody sees a release with
+missing files, and a failed build leaves an unpublished draft instead of a half-filled public
+release. Optional later: `actions/attest-build-provenance` in `publish` (needs `id-token:
+write` and `attestations: write`) so users can check where a binary was built.
+
+All third-party actions with write access (`release-please-action`, `rust-toolchain`,
+`rust-cache`) are pinned to a full commit SHA with the tag in a comment.
+
+## Small code changes that go with this
+
+- `reporter`: `#[command(version)]` on the clap struct, so `reporter --version` prints the
+  workspace version.
+- `daemon`: print `daemon <version> listening on ...` at startup using
+  `env!("CARGO_PKG_VERSION")`, so `journalctl` shows what is running.
+- `pi/dashboard.py`: read `SOCKET_PATH` from the environment (already does). No change.
+
+## Trade-offs
+
+| Decision | Chosen | Alternative | Why |
+|---|---|---|---|
+| Linux libc | musl static | glibc on `ubuntu-22.04` with a max-GLIBC check | runs on any distro, no runner pinning; cost is a slightly slower allocator, irrelevant here |
+| aarch64 builds | native arm64 runner | cross linker on x86 | no linker config, same steps as x86; needs a public repo (it will be one) |
+| Windows | `x86_64-pc-windows-gnu` cross | `x86_64-pc-windows-msvc` on `windows-latest` | keeps every job on Linux and matches today; MSVC is the more common Windows target (open question 3) |
+| Install location | `/opt` with versioned releases and a `current` link | copy into a home directory (today) | upgrade and rollback are a symlink switch; no dependency on a login user |
+| Service user | dedicated `pi-homelab` | the login user | least privilege, units become static files |
+| Packaging logic | `scripts/package-pi-bundle.sh` used by CI and provisioning | inline in the workflow | one definition, testable locally |
+| Asset names | no version in the name | version in the name | stable "latest" download links for the docs |
+
+## Order of work
+
+1. `deploy/` files (units, overlay.env, env.example) and the socket move to `/run`; switch
+   `provision-pi.sh` to them. security-specialist reviews.
+2. `install.sh`, `uninstall.sh`, `scripts/package-pi-bundle.sh`; test with `provision-pi.sh`
+   on the real Pi, including a second run (upgrade) and `uninstall.sh`.
+3. `cargo fmt --all` commit, workspace lints, new CI jobs.
+4. `release.yml` rewrite (musl, artifacts, publish job, draft releases, checksums).
+5. Version output in daemon and reporter.
+
+## Open questions for the CEO
+
+1. Service user: a dedicated `pi-homelab` system user (recommended) or keep running as the
+   login user like today?
+2. Install path: `/opt/pi-homelab-dashboard` with versioned releases (recommended) or
+   something simpler in the home directory?
+3. Windows build: keep the mingw cross build (recommended for v0.1.0, all Linux jobs) or move
+   to MSVC on a Windows runner?
+4. 32-bit: the bundle is aarch64 only and `install.sh` refuses 32-bit Pi OS. Should we also
+   ship an `armv7` reporter for older Pis on 32-bit OS? (recommended: not for v0.1.0)
+5. Older Pi OS: require Bookworm or later (`/boot/firmware`), or also support the legacy
+   `/boot/config.txt` layout? (recommended: Bookworm or later only)
+6. Draft releases: OK that a release only becomes public after all binaries are attached
+   (recommended), which depends on release-please's `force-tag-creation` option?
+7. Build provenance attestations in v0.1.0, or later?

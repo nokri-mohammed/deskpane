@@ -53,3 +53,10 @@ flowchart TD
 | 2026-11-07 | chief of staff | Onboarded the team: architecture, tdd, review, patterns, essentials; wrote the CLAUDE.md briefing, backlog and this file |
 | 2026-11-07 | chief of staff | Reviewed open-source readiness, drafted the v0.1.0 release plan |
 | 2026-11-07 | chief of staff | Release phase 1: scrubbed private values and the unlicensed overlay from all history; phase 2: one workspace version, release-please |
+| 2026-11-07 | tdd-guide | T-002: report validation in the daemon (37 tests, test first), try/except around dashboard drawing, limits in CONTRACT.md |
+| 2026-11-07 | security-reviewer | Pre-publish review of the cleanup: history clean, overlay gone; findings logged as T-010, T-011, T-012 |
+| 2026-11-07 | architect | Reviewed versioning setup (fixes in T-010, T-013, T-014), designed phase 3 release artifacts (docs/plans/2026-11-07-release-artifacts.md) |
+| 2026-11-07 | code-reviewer | Reviewed T-002: changes needed (reporter can send reports the daemon rejects, test gaps); sent back to tdd-guide |
+| 2026-11-07 | tdd-guide | T-002 review fixes: empty hostname allowed, out-of-range temps read as 0, 7 more tests (83 total), dashboard log rate limit |
+| 2026-11-07 | code-reviewer | Re-reviewed T-002: approved; three small follow-ups (log flood guard, test message, infinity test) |
+| 2026-11-07 | tdd-guide | T-002 follow-ups: log flood guard, test message, infinity test (84 tests) |
