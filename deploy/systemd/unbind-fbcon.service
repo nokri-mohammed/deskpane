@@ -1,0 +1,18 @@
+# fbcon=map:1 alone isn't always enough: depending on driver probe timing a
+# second VT console can still bind directly to the touchscreen fb (seen as
+# a blinking text cursor on screen), bypassing the map directive. Belt and
+# braces: unbind any non-dummy vtconsole at boot, before the dashboard starts.
+# Installed by deploy/install.sh.
+[Unit]
+Description=Unbind text console from the touchscreen framebuffer
+After=systemd-udev-settle.service
+Before=homelab-dashboard.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for v in /sys/class/vtconsole/vtcon*; do grep -q dummy "$v/name" || echo 0 > "$v/bind"; done'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

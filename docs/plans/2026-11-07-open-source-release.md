@@ -86,6 +86,9 @@ check.
 
 ## Decisions for the CEO
 
+Answered 2026-11-07: keep the commit author email as is. GitHub repo setup (T-017) happens when we are ready to publish.
+
+
 1. Repo name and owner: `nokri-mohammed/pi-homelab-dashboard`?
 2. Rewrite git history to remove the hostname and IP before the first push? (recommended: yes)
 3. Fix the two HIGH security items before v0.1.0? (recommended: yes)

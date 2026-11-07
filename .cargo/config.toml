@@ -1,2 +1,7 @@
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
+
+# static Pi and Linux arm64 builds (the release downloads); on an arm64 host the same name
+# is the native gcc, so CI on the arm64 runner needs no extra setup
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-gnu-gcc"

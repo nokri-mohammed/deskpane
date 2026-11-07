@@ -7,3 +7,23 @@ members = ["daemon", "reporter"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+# shipped as release downloads, never to crates.io
+publish = false
+
+# lints that fight the rust-patterns house style (explicit match, no shorthand)
+[workspace.lints.clippy]
+redundant_field_names = "allow"
+needless_late_init = "allow"
+needless_bool_assign = "allow"
+single_match = "allow"
+manual_unwrap_or = "allow"
+manual_unwrap_or_default = "allow"
+question_mark = "allow"
+manual_map = "allow"
+match_like_matches_macro = "allow"
+redundant_pattern_matching = "allow"
+manual_range_contains = "allow"
+
+# smaller release downloads: drop debug symbols from the binaries
+[profile.release]
+strip = true

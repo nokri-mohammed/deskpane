@@ -1,0 +1,43 @@
+# Reports the Pi's own stats to the daemon on the same Pi. Installed by
+# deploy/install.sh.
+[Unit]
+Description=pi-homelab-dashboard reporter (reports the Pi's own stats)
+After=network-online.target homelab-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi-homelab
+Group=pi-homelab
+# DEVICE_ID and LABEL come from here
+EnvironmentFile=/etc/pi-homelab-dashboard/env
+# ${VAR} (with braces) stays one argument, so a label with spaces works
+ExecStart=/opt/pi-homelab-dashboard/current/bin/reporter run --daemon 127.0.0.1:8765 --device-id ${DEVICE_ID} --label ${LABEL} --interval 2
+Restart=always
+RestartSec=2
+
+# sandbox (security-specialist, T-010): must be confirmed on the real Pi before release
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -42,8 +42,16 @@ pi/
   dashboard.py        reads the socket, draws an overview page, then one device per page
   fb_display.py       framebuffer drawing
   touch.py            evdev tap watcher
+deploy/
+  systemd/*.service   the four units the Pi bundle installs (static, user pi-homelab)
+  install.sh          installs or upgrades the Pi bundle (runs as root on the Pi)
+  uninstall.sh        removes it (--purge also removes settings, user, boot lines)
+  overlay.env         pinned display overlay URL + SHA-256 (the overlay is never shipped)
+  env.example         becomes /etc/pi-homelab-dashboard/env on first install
+  README.txt          bundle readme
 scripts/
-  provision-pi.sh     pushes this repo onto a freshly flashed Pi
+  package-pi-bundle.sh  builds dist/pi-homelab-dashboard-pi-aarch64.tar.gz
+  provision-pi.sh       builds the bundle and runs its install.sh on a Pi over SSH
 docs/
   CONTRACT.md         JSON wire shape and report limits
   plans/              plans, one file per topic
@@ -56,17 +64,24 @@ docs/
 ## Commands
 
 Use `~/.cargo/bin/cargo`. `/usr/bin/cargo` is 1.75 and too old for this workspace.
+`rust-toolchain.toml` pins Rust 1.99.1 for local builds and CI; bump it together with the
+`toolchain:` inputs in `.github/workflows/`.
 
 ```bash
 ~/.cargo/bin/cargo test --workspace                                   # 94 tests: daemon 76, reporter 18
-~/.cargo/bin/cargo build --release --target aarch64-unknown-linux-gnu # Pi build (linker in .cargo/config.toml)
+~/.cargo/bin/cargo build --release --locked --target aarch64-unknown-linux-musl # Pi build, static (linker in .cargo/config.toml)
+scripts/package-pi-bundle.sh                                          # Pi bundle from that build, into dist/
+scripts/provision-pi.sh pi-zero                                       # bundle + install.sh on a Pi over SSH
+~/.cargo/bin/cargo fmt --all --check                                  # CI runs these two as well
+~/.cargo/bin/cargo clippy --workspace --all-targets --locked -- -D warnings
 ~/.cargo/bin/cargo run -p daemon                                      # LISTEN_ADDR, SOCKET_PATH, PROTOCOL env vars
 ~/.cargo/bin/cargo run -p reporter -- run --daemon 127.0.0.1:8765 --device-id dev --label Dev
 ```
 
 The Windows target (`x86_64-pc-windows-gnu`) is not installed on this machine. CI and the release
 workflow build it. `.github/workflows/release.yml` runs on every push to `main`: release-please
-keeps a release PR open, and merging it tags `vX.Y.Z` and builds the release binaries.
+keeps a release PR open, and merging it tags `vX.Y.Z`, creates a draft release, builds the
+downloads and publishes the release with `SHA256SUMS`. Plan: `docs/plans/2026-11-07-release-artifacts.md`.
 
 ## Code style
 
@@ -117,7 +132,7 @@ Executives on this project (hub plugins `architecture`, `tdd`, `review`, `patter
   v1. The Unix socket is local. Open findings are in `docs/backlog.md` (T-006 MEDIUM items and
   others).
 - **security-specialist**: owns firewall, ports, systemd hardening and the Pi provisioning in
-  `scripts/provision-pi.sh`.
+  `scripts/provision-pi.sh`, `deploy/install.sh` and `deploy/systemd/`.
 - **doc-updater**: keep `README.md` (layout, status), `docs/CONTRACT.md` (wire shape) and this
   file in sync with the code. Task tracking is in `docs/backlog.md`. Keep `docs/TEAM.md`
   current: diagram on team changes, a log line after each executive task.

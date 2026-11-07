@@ -33,7 +33,7 @@ dtoverlay=tft35a:rotate=0
 This is **not** the generic mainline `ili9486` fbtft chip definition.
 It's a precompiled device-tree overlay (`tft35a.dtbo`, installed
 to `/boot/firmware/overlays/`; not shipped in this repo because the vendor repo has no
-license, `scripts/provision-pi.sh` downloads it pinned to one commit and checks its hash) taken from the vendor's own driver project,
+license, `deploy/install.sh` downloads it pinned to one commit and checks its hash) taken from the vendor's own driver project,
 [goodtft/LCD-show](https://github.com/goodtft/LCD-show) (their `LCD35-show`
 script references it as `tft35a`). It uses the same in-kernel `fbtft`
 framework (`compatible = "ilitek,ili9486"`, same driver we started with),
@@ -55,7 +55,7 @@ for a headless setup (removes X11 config, forces HDMI hotplug/mode,
 installs fbcp/cmake, installs X11 input packages, rewrites `/etc/inittab`,
 auto-reboots). We only took the one file we needed
 (`usr/tft35a-overlay.dtb`) and wired it in ourselves via
-`scripts/provision-pi.sh`.
+`deploy/install.sh`.
 
 ### `rotate=0`, not `rotate=90`: rotation is done in software
 
@@ -92,7 +92,7 @@ on screen, positioned wherever the console happened to think its cursor
 was. Confirm with `cat /sys/class/vtconsole/vtcon*/name` and
 `.../bind`: anything not `(S) dummy device` with `bind=1` is a live
 console on a real fb. Fixed with a small oneshot systemd service,
-`unbind-fbcon.service` (installed by `provision-pi.sh`), that unbinds any
+`unbind-fbcon.service` (`deploy/systemd/`, installed by `deploy/install.sh`), that unbinds any
 non-dummy vtconsole at boot, before the dashboard starts.
 
 ### Frame writes use `os.pwrite()`, not `mmap`

@@ -1,7 +1,7 @@
 # Plan: release artifacts (T-007 phase 3)
 
-Status: draft, waiting for CEO approval. Owner: architect designs, security-specialist reviews
-`install.sh` and the systemd units, chief of staff implements.
+Status: approved by the CEO on 2026-11-07 (see Decisions). Owner: architect designs and
+implements (T-010 plus phase 3), security-specialist reviews `install.sh` and the systemd units.
 
 Parent plan: `docs/plans/2026-11-07-open-source-release.md`.
 
@@ -293,18 +293,75 @@ All third-party actions with write access (`release-please-action`, `rust-toolch
 4. `release.yml` rewrite (musl, artifacts, publish job, draft releases, checksums).
 5. Version output in daemon and reporter.
 
-## Open questions for the CEO
+## Decisions (CEO, 2026-11-07)
 
-1. Service user: a dedicated `pi-homelab` system user (recommended) or keep running as the
-   login user like today?
-2. Install path: `/opt/pi-homelab-dashboard` with versioned releases (recommended) or
-   something simpler in the home directory?
-3. Windows build: keep the mingw cross build (recommended for v0.1.0, all Linux jobs) or move
-   to MSVC on a Windows runner?
-4. 32-bit: the bundle is aarch64 only and `install.sh` refuses 32-bit Pi OS. Should we also
-   ship an `armv7` reporter for older Pis on 32-bit OS? (recommended: not for v0.1.0)
-5. Older Pi OS: require Bookworm or later (`/boot/firmware`), or also support the legacy
-   `/boot/config.txt` layout? (recommended: Bookworm or later only)
-6. Draft releases: OK that a release only becomes public after all binaries are attached
-   (recommended), which depends on release-please's `force-tag-creation` option?
-7. Build provenance attestations in v0.1.0, or later?
+All seven recommendations approved:
+
+1. Service user: a dedicated `pi-homelab` system user.
+2. Install path: `/opt/pi-homelab-dashboard/releases/<version>/` with a `current` symlink.
+3. Windows build: keep the mingw cross build (`x86_64-pc-windows-gnu`) for v0.1.0.
+4. 32-bit: no `armv7` reporter in v0.1.0; `install.sh` refuses 32-bit Pi OS.
+5. Pi OS: Bookworm or later only (`/boot/firmware`).
+6. Releases: created as drafts, published by one final `publish` job once every file is
+   attached (release-please `draft` plus `force-tag-creation`).
+7. Build provenance attestations: later, not in v0.1.0.
+
+## Implementation notes (T-010 plus phase 3, 2026-11-07)
+
+Built as designed, with these changes found while implementing:
+
+- Clippy allow list: two more lints fire on house-style code and are allowed:
+  `redundant_pattern_matching` (`match wrote { Ok(_) => true, Err(_) => false }`) and
+  `manual_range_contains` (`cpu >= 0.0 && cpu <= 100.0`).
+- Cargo.lock extra-files: release-please's TOML parser wraps every value as
+  `{start, end, value}`, so the filter must be `$.package[?(@.name.value==='daemon')].version`.
+  Checked by running release-please 17.11.2's own `GenericToml` updater on the real files: it
+  bumps `Cargo.toml` and both `Cargo.lock` entries and nothing else.
+- release-please-action is pinned to v5.0.0 (only breaking change: Node 24; bundles
+  release-please 17.6.0, which reads `draft`, `force-tag-creation` and `initial-version`).
+  GitHub's own actions are pinned to full SHAs too, not only third-party ones.
+- No `musl-tools` on the runners: the crates have no C code, and Rust's self-contained musl
+  linking worked locally with plain gcc. `.cargo/config.toml` names `aarch64-linux-gnu-gcc` as
+  the aarch64 musl linker, which is the cross gcc on x86 and the native gcc on an arm64 runner.
+- `[profile.release] strip = true`: the static aarch64 binaries are about 1 MB each.
+- `provision-pi.sh` downloads and checks the overlay on the developer machine before it touches
+  the Pi (T-011), then passes it with `install.sh --overlay-file`, which checks the hash again
+  and once more right before writing into `/boot/firmware/overlays`. It runs `sudo` over
+  `ssh -t`, so the NOPASSWD sudoers line is no longer needed. Default SSH host is `pi-zero`.
+- `install.sh` wraps its `config.txt` lines in `# >>> pi-homelab-dashboard` / `# <<<` markers;
+  `uninstall.sh --purge` deletes that block (and a bare `dtoverlay=tft35a` line from older
+  provisioning) instead of restoring the `.bak` copy, so later user edits survive.
+- `--label` accepts letters, digits, spaces and `. _ ( ) -` only, because the value lands in a
+  file systemd parses.
+- When a reboot is needed (first install), `install.sh` enables but does not start the dashboard
+  and `unbind-fbcon`, since `/dev/fb1` only appears after the reboot.
+- The version output in daemon and reporter is ticket T-013, not part of this change.
+
+### Security review fixes (2026-11-07)
+
+From security-specialist (install package) and security-reviewer (workflows):
+
+- The service user gets no `video`/`input` groups; only the dashboard unit has them, through
+  `SupplementaryGroups=`.
+- `/etc/pi-homelab-dashboard/env` is `0600 root:root`, enforced on every run without changing
+  its content (systemd reads it as root).
+- The `config.txt` block starts with `[all]`, so it never lands under a trailing `[cm4]`-style
+  section.
+- Daemon and reporter units carry a full sandbox (the reporter with `ProtectHome=read-only`);
+  the dashboard a minimal one, without `PrivateDevices` because it needs `/dev/fb1` and
+  `/dev/input`. All three must be confirmed on the real Pi. Offline
+  `systemd-analyze security`: daemon 1.7, reporter 1.8, dashboard 5.2.
+- Re-running the same version keeps the newest other release as the rollback.
+- `--device-id` and `--label` must start with a letter or digit.
+- On a re-run, known units not selected this time are `disable --now`'d.
+- `sync` after every boot file change in `install.sh` and `uninstall.sh`.
+- `apt-get` runs only when `dpkg-query` says the packages are missing, with
+  `--no-install-recommends`.
+- `provision-pi.sh` checks `OVERLAY_URL` against the pinned-commit pattern and rejects an SSH
+  host starting with `-`.
+- Workflows: `persist-credentials: false` on every checkout, `publish` gated on
+  `release_created`, `matrix.target` passed through `env`, and `rust-toolchain.toml` pins Rust
+  1.99.1 with the same version as `toolchain:` on every `dtolnay/rust-toolchain` step.
+
+Deferred to T-006: a separate daemon user, a udev rule for the touchscreen only, a sandbox for
+`unbind-fbcon`, more precise uninstall with a state file, and signing.

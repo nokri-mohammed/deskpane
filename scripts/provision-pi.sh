@@ -1,172 +1,64 @@
 #!/usr/bin/env bash
-# Pushes this repo's built software onto a freshly-flashed Pi and wires it up
-# to survive reboots via systemd. Run from the repo root, after:
-#   1. Flashing the SD card with Raspberry Pi OS Lite (64-bit) using
-#      Raspberry Pi Imager's gear-icon customization (hostname, SSH,
-#      username/password, WiFi SSID/password) so the Pi comes up on the
-#      network with no manual boot-partition editing.
-#   2. Building the Rust binaries for the Pi's architecture:
-#        cargo build --release --target aarch64-unknown-linux-gnu
-#   3. Having an SSH alias for the Pi (this repo's docs assume `pi-display`
-#      in ~/.ssh/config) that resolves and accepts your key.
-#   4. Passwordless sudo for apt-get/tee/systemctl, since this script runs
-#      sudo non-interactively over SSH. On the Pi:
-#        echo 'USERNAME ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/tee, /usr/bin/systemctl' \
-#          | sudo tee /etc/sudoers.d/homelab-dashboard
-#        sudo chmod 440 /etc/sudoers.d/homelab-dashboard
+# Installs this repo's build onto a Raspberry Pi over SSH, the same way a user
+# installs a release: build the Pi bundle, copy it over, run its install.sh.
+# Run from anywhere inside the repo, after:
+#   1. Flashing Raspberry Pi OS Lite (64-bit, Bookworm or later) with Raspberry
+#      Pi Imager's customization (hostname, SSH, user, WiFi).
+#   2. Building the Pi binaries:
+#        cargo build --release --locked --target aarch64-unknown-linux-musl
+#   3. Having an SSH alias for the Pi (default `pi-zero` in ~/.ssh/config).
+# sudo on the Pi asks for your password; no passwordless sudo is needed.
 #
-# Usage: scripts/provision-pi.sh [ssh-host]   (default: pi-display)
-#
-# NOTE: a display overlay/console change applied here only takes effect
-# after a reboot -- the script will tell you at the end if one is needed.
+# Usage: scripts/provision-pi.sh [ssh-host] [install.sh options...]
+#   e.g. scripts/provision-pi.sh pi-zero --label "Pi Zero"
 set -euo pipefail
 
-HOST="${1:-pi-display}"
-REMOTE_DIR="pi-homelab-dashboard"
-BIN_DIR="target/aarch64-unknown-linux-gnu/release"
-
-# display overlay from the vendor (goodtft/LCD-show has no license, so we
-# download it instead of shipping it), pinned to one commit and checked by hash
-OVERLAY_URL="https://raw.githubusercontent.com/goodtft/LCD-show/8cb161e14073db9073bb1076cf86d61b8b55ed30/usr/tft35a-overlay.dtb"
-OVERLAY_SHA256="601ea7056da5d7864648798fd3656b4205f01d6b9a6a8a5cfad6ca5601bbbe1e"
-
-for bin in daemon reporter; do
-  if [[ ! -f "$BIN_DIR/$bin" ]]; then
-    echo "error: $BIN_DIR/$bin not found, build it first:" >&2
-    echo "  cargo build --release --target aarch64-unknown-linux-gnu" >&2
-    exit 1
-  fi
-done
-
-echo "==> checking SSH connectivity to $HOST"
-ssh -o ConnectTimeout=5 "$HOST" "mkdir -p ~/$REMOTE_DIR"
-
-echo "==> downloading display overlay from goodtft/LCD-show"
-OVERLAY_FILE="$(mktemp)"
-trap 'rm -f "$OVERLAY_FILE"' EXIT
-curl -fsSL "$OVERLAY_URL" -o "$OVERLAY_FILE"
-echo "$OVERLAY_SHA256  $OVERLAY_FILE" | sha256sum -c --quiet
-
-echo "==> copying dashboard + binaries"
-scp -q "$OVERLAY_FILE" "$HOST:~/$REMOTE_DIR/tft35a.dtbo"
-scp -q pi/dashboard.py pi/fb_display.py pi/touch.py \
-    "$BIN_DIR/daemon" "$BIN_DIR/reporter" \
-    "$HOST:~/$REMOTE_DIR/"
-
-REMOTE_USER="$(ssh "$HOST" 'echo $USER')"
-REMOTE_HOME="$(ssh "$HOST" 'echo $HOME')"
-
-echo "==> installing system dependencies (python3-pygame, python3-evdev)"
-ssh "$HOST" "sudo apt-get update -qq && sudo apt-get install -y -qq python3-pygame python3-evdev"
-
-echo "==> installing display overlay (Elegoo 3.5\" SPI touchscreen, ILI9486+XPT2046)"
-ssh "$HOST" "cat ~/$REMOTE_DIR/tft35a.dtbo | sudo tee /boot/firmware/overlays/tft35a.dtbo > /dev/null"
-
-REBOOT_NEEDED=0
-if ssh "$HOST" "grep -q '^dtoverlay=tft35a' /boot/firmware/config.txt"; then
-  echo "    config.txt already has the tft35a overlay"
-else
-  echo "    adding tft35a overlay to config.txt"
-  ssh "$HOST" "printf '\n# Elegoo 3.5\" SPI touchscreen (ILI9486 + XPT2046 touch) -- vendor-tuned\n# gamma/init overlay from goodtft/LCD-show (usr/tft35a-overlay.dtb).\n# rotate=0: kernel-level rotate=90 is buggy on this driver/kernel combo\n# (corrupts the frame), so rotation is done in software instead, in\n# fb_display.py.\ndtoverlay=tft35a:rotate=0\n' | sudo tee -a /boot/firmware/config.txt > /dev/null"
-  REBOOT_NEEDED=1
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOST="${1:-pi-zero}"
+if [[ $# -gt 0 ]]; then
+  shift
 fi
+BIN_DIR="${BIN_DIR:-$REPO/target/aarch64-unknown-linux-musl/release}"
 
-if ssh "$HOST" "grep -q 'fbcon=map:1' /boot/firmware/cmdline.txt"; then
-  echo "    cmdline.txt already keeps the text console off the touchscreen"
-else
-  echo "    keeping the text console off the touchscreen framebuffer"
-  ssh "$HOST" 'content=$(cat /boot/firmware/cmdline.txt); printf "%s fbcon=map:1" "$content" | sudo tee /boot/firmware/cmdline.txt > /dev/null'
-  REBOOT_NEEDED=1
+die() {
+  echo "provision-pi.sh: error: $*" >&2
+  exit 1
+}
+
+# an ssh host starting with "-" would be read as an ssh option
+[[ "$HOST" != -* ]] || die "ssh host must not start with '-': $HOST"
+
+# local work directory, removed on exit
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+# download and verify the display overlay here, before touching the Pi
+OVERLAY_URL="$(sed -n 's/^OVERLAY_URL=//p' "$REPO/deploy/overlay.env" | head -n 1)"
+OVERLAY_SHA256="$(sed -n 's/^OVERLAY_SHA256=//p' "$REPO/deploy/overlay.env" | head -n 1)"
+[[ "$OVERLAY_URL" =~ ^https://raw\.githubusercontent\.com/goodtft/LCD-show/[0-9a-f]{40}/ ]] ||
+  die "deploy/overlay.env: OVERLAY_URL must point at a pinned goodtft/LCD-show commit"
+[[ "$OVERLAY_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "deploy/overlay.env: bad OVERLAY_SHA256"
+echo "==> downloading and checking the display overlay"
+curl -fsSL --proto '=https' --tlsv1.2 --max-time 120 "$OVERLAY_URL" -o "$WORK_DIR/tft35a.dtbo"
+echo "$OVERLAY_SHA256  $WORK_DIR/tft35a.dtbo" | sha256sum -c --quiet - ||
+  die "overlay hash mismatch, nothing was copied to the Pi"
+
+# build the same bundle a release ships
+echo "==> packaging the Pi bundle"
+"$REPO/scripts/package-pi-bundle.sh" --bin-dir "$BIN_DIR" --out-dir "$WORK_DIR" >/dev/null
+VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$REPO/Cargo.toml" | head -n 1)"
+TOP="pi-homelab-dashboard-$VERSION-pi-aarch64"
+
+# copy bundle and overlay into a fresh temp directory on the Pi
+echo "==> copying to $HOST"
+REMOTE_DIR="$(ssh -o ConnectTimeout=5 "$HOST" 'mktemp -d')"
+[[ "$REMOTE_DIR" =~ ^/tmp/tmp\.[A-Za-z0-9]+$ ]] || die "unexpected remote temp dir: $REMOTE_DIR"
+scp -q "$WORK_DIR/pi-homelab-dashboard-pi-aarch64.tar.gz" "$WORK_DIR/tft35a.dtbo" "$HOST:$REMOTE_DIR/"
+
+# extract and install; -t so sudo can ask for the password
+INSTALL_ARGS=""
+if [[ $# -gt 0 ]]; then
+  INSTALL_ARGS="$(printf ' %q' "$@")"
 fi
-
-# fbcon=map:1 alone isn't always enough: depending on driver probe timing a
-# second VT console can still bind directly to the touchscreen fb (seen as
-# a blinking text cursor on screen), bypassing the map directive. Belt and
-# braces: unbind any non-dummy vtconsole at boot, before the dashboard starts.
-ssh "$HOST" "sudo tee /etc/systemd/system/unbind-fbcon.service > /dev/null" << 'EOF'
-[Unit]
-Description=Unbind text console from the touchscreen framebuffer
-After=systemd-udev-settle.service
-Before=homelab-dashboard.service
-Wants=systemd-udev-settle.service
-
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'for v in /sys/class/vtconsole/vtcon*; do grep -q dummy "$v/name" || echo 0 > "$v/bind"; done'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-ssh "$HOST" "sudo systemctl daemon-reload && sudo systemctl enable --now unbind-fbcon"
-
-echo "==> writing systemd units"
-ssh "$HOST" "chmod +x ~/$REMOTE_DIR/daemon ~/$REMOTE_DIR/reporter"
-
-ssh "$HOST" "sudo tee /etc/systemd/system/homelab-daemon.service > /dev/null" << EOF
-[Unit]
-Description=pi-homelab-dashboard report daemon
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$REMOTE_USER
-WorkingDirectory=$REMOTE_HOME/$REMOTE_DIR
-ExecStart=$REMOTE_HOME/$REMOTE_DIR/daemon
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-ssh "$HOST" "sudo tee /etc/systemd/system/homelab-dashboard.service > /dev/null" << EOF
-[Unit]
-Description=pi-homelab-dashboard touchscreen UI
-After=homelab-daemon.service
-Wants=homelab-daemon.service
-
-[Service]
-Type=simple
-User=$REMOTE_USER
-WorkingDirectory=$REMOTE_HOME/$REMOTE_DIR
-ExecStart=/usr/bin/python3 $REMOTE_HOME/$REMOTE_DIR/dashboard.py
-# on-failure, not always: a tap-to-exit (clean exit 0) should stay exited,
-# only a crash (nonzero exit) should auto-restart.
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-ssh "$HOST" "sudo tee /etc/systemd/system/homelab-reporter.service > /dev/null" << EOF
-[Unit]
-Description=pi-homelab-dashboard reporter (reports the Pi's own stats)
-After=network-online.target homelab-daemon.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$REMOTE_USER
-WorkingDirectory=$REMOTE_HOME/$REMOTE_DIR
-ExecStart=$REMOTE_HOME/$REMOTE_DIR/reporter run --daemon 127.0.0.1:8765 --device-id pi --label "Raspberry Pi" --interval 2
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-echo "==> enabling + starting services"
-ssh "$HOST" "sudo systemctl daemon-reload && sudo systemctl enable --now homelab-daemon homelab-dashboard homelab-reporter"
-
-echo "==> done. Checking status:"
-ssh "$HOST" "systemctl --no-pager status homelab-daemon homelab-dashboard homelab-reporter | grep -E 'Loaded|Active|●'"
-
-if [[ "${REBOOT_NEEDED:-0}" -eq 1 ]]; then
-  echo
-  echo "==> config.txt/cmdline.txt changed (display overlay or console mapping)."
-  echo "    These only take effect after a reboot: ssh $HOST sudo systemctl reboot"
-fi
+echo "==> running install.sh on $HOST"
+ssh -t "$HOST" "cd $REMOTE_DIR && tar xzf pi-homelab-dashboard-pi-aarch64.tar.gz && sudo ./$TOP/install.sh --overlay-file $REMOTE_DIR/tft35a.dtbo$INSTALL_ARGS; status=\$?; rm -rf $REMOTE_DIR; exit \$status"

@@ -69,7 +69,11 @@ reporter/     Stats reporter (Rust): runs on every reporting device,
 docs/         CONTRACT.md (the JSON shape devices report in), HARDWARE.md,
               RECOVERY.md, and diagram/ (architecture diagram source +
               rendered PNGs)
-scripts/      provision-pi.sh: pushes this repo onto a freshly-flashed Pi
+deploy/       what the Pi bundle installs: systemd units, install.sh,
+              uninstall.sh, overlay.env (pinned overlay URL + hash),
+              env.example
+scripts/      package-pi-bundle.sh: builds the Pi bundle; provision-pi.sh:
+              builds the bundle and runs install.sh on a Pi over SSH
 ```
 
 `daemon/` and `reporter/` are one Cargo workspace: one `Cargo.toml` at the
@@ -135,18 +139,31 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org)
 (`feat:`, `fix:`, `docs:`, ..., `feat!:` or a `BREAKING CHANGE:` footer for breaking
 changes). On every push to `main`, [release-please](https://github.com/googleapis/release-please)
 keeps a release PR open with the next version and the `CHANGELOG.md` entry. Merging that PR
-tags `vX.Y.Z`, creates the GitHub Release, and
-[`.github/workflows/release.yml`](.github/workflows/release.yml) attaches the binaries for
-every target (Pi/aarch64, Linux x86_64, Windows x86_64).
+tags `vX.Y.Z` and creates a draft GitHub Release.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) then builds the downloads,
+attaches them with a `SHA256SUMS` file and publishes the release:
 
-Every push and PR to `main` also runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-(`cargo build` + `cargo test` for the whole workspace).
+| File | For |
+|---|---|
+| `pi-homelab-dashboard-pi-aarch64.tar.gz` | the Pi: daemon, reporter, dashboard, systemd units, `install.sh` (64-bit Raspberry Pi OS Bookworm or later) |
+| `reporter-linux-x86_64.tar.gz`, `reporter-linux-aarch64.tar.gz` | other Linux machines (static binaries) |
+| `reporter-windows-x86_64.zip` | Windows |
+| `SHA256SUMS` | checking the downloads |
+
+The display overlay is not in the bundle (its vendor repo has no license); `install.sh`
+downloads it from a pinned commit and checks its SHA-256.
+
+Every push and PR to `main` also runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
+`cargo fmt --check`, `cargo clippy -D warnings` (the lints that fight the house style are
+allowed in `[workspace.lints.clippy]` in `Cargo.toml`), `cargo test --locked`, shellcheck, a
+Python compile check, and a trial build of the Pi bundle.
 
 ## Setup (once the above is built)
 
 1. Build and run `daemon/` from the workspace root:
    `cargo run -p daemon` (env vars: `LISTEN_ADDR` default `0.0.0.0:8765`,
-   `SOCKET_PATH` default `/tmp/pi-homelab-dashboard.sock`).
+   `SOCKET_PATH` default `/tmp/pi-homelab-dashboard.sock`; the installed
+   systemd units use `/run/pi-homelab-dashboard/daemon.sock`).
 2. Run `pi/dashboard.py` alongside it, reading the same `SOCKET_PATH`.
 3. On each reporting device: `cargo run -p reporter -- run --daemon
    <pi-ip>:8765 --device-id <id> --label <name>` (native build for Linux;

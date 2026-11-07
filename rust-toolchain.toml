@@ -1,0 +1,7 @@
+# The exact Rust release CI, the release builds and local builds use. When bumping it,
+# also bump `toolchain:` on every dtolnay/rust-toolchain step in .github/workflows/,
+# so the targets the workflow installs land in this same toolchain.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

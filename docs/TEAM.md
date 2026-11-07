@@ -64,3 +64,8 @@ flowchart TD
 | 2026-11-07 | code-reviewer | Reviewed T-003: approved, four polish items; follow-ups T-015, T-016 |
 | 2026-11-07 | tdd-guide | T-003 polish: wording, log line, saturating time math, 2 more tests (94 total) |
 | 2026-11-07 | doc-updater | T-012 docs pass: CLAUDE.md, README status, CONTRACT.md offline sentence, release plan rows, em dashes removed |
+| 2026-11-07 | architect | Built T-010, T-011 and phase 3: draft-then-publish release workflow, CI checks, Pi bundle with install.sh, systemd units under deploy/ |
+| 2026-11-07 | security-reviewer | Reviewed release workflows: safe to merge, all action pins verified; fixes: persist-credentials false, explicit publish if, env for matrix.target, pinned toolchain |
+| 2026-11-07 | security-specialist | Reviewed the Pi install package: caution, 4 must-fix (groups, env file mode, [all] in config.txt, unit sandboxing) plus 6 cheap fixes; rest deferred to T-006 |
+| 2026-11-07 | doc-updater | Phase 4 first pass: INSTALL.md, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, issue and PR templates |
+| 2026-11-07 | architect | Applied the 14 security review fixes (groups, env mode, [all] block, unit sandboxing, rollback keep, input checks, workflow token and toolchain pin) |
