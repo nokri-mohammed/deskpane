@@ -7,6 +7,7 @@
 - T-004 Replace real hostname/IP/username in docs with placeholders: [todo 2026-11-07]
 - T-005 Relay skips RecvError::Lagged instead of disconnecting: [todo 2026-11-07]
 - T-006 Security MEDIUM items (HMAC, firewall, socket in /run, systemd hardening, sudoers): [todo 2026-11-07]
+- T-007 Open-source release v0.1.0 (plan: docs/plans/2026-11-07-open-source-release.md): [todo 2026-11-07]
 
 ## In Progress
 
