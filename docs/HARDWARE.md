@@ -31,8 +31,9 @@ dtoverlay=tft35a:rotate=0
 ```
 
 This is **not** the generic mainline `ili9486` fbtft chip definition —
-it's a precompiled device-tree overlay (`pi/assets/tft35a.dtbo`, installed
-to `/boot/firmware/overlays/`) taken from the vendor's own driver project,
+it's a precompiled device-tree overlay (`tft35a.dtbo`, installed
+to `/boot/firmware/overlays/`; not shipped in this repo because the vendor repo has no
+license, `scripts/provision-pi.sh` downloads it pinned to one commit and checks its hash) taken from the vendor's own driver project,
 [goodtft/LCD-show](https://github.com/goodtft/LCD-show) (their `LCD35-show`
 script references it as `tft35a`). It uses the same in-kernel `fbtft`
 framework (`compatible = "ilitek,ili9486"`, same driver we started with),

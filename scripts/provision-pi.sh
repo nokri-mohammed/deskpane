@@ -25,6 +25,11 @@ HOST="${1:-pi-display}"
 REMOTE_DIR="pi-homelab-dashboard"
 BIN_DIR="target/aarch64-unknown-linux-gnu/release"
 
+# display overlay from the vendor (goodtft/LCD-show has no license, so we
+# download it instead of shipping it), pinned to one commit and checked by hash
+OVERLAY_URL="https://raw.githubusercontent.com/goodtft/LCD-show/8cb161e14073db9073bb1076cf86d61b8b55ed30/usr/tft35a-overlay.dtb"
+OVERLAY_SHA256="601ea7056da5d7864648798fd3656b4205f01d6b9a6a8a5cfad6ca5601bbbe1e"
+
 for bin in daemon reporter; do
   if [[ ! -f "$BIN_DIR/$bin" ]]; then
     echo "error: $BIN_DIR/$bin not found — build it first:" >&2
@@ -36,8 +41,15 @@ done
 echo "==> checking SSH connectivity to $HOST"
 ssh -o ConnectTimeout=5 "$HOST" "mkdir -p ~/$REMOTE_DIR"
 
+echo "==> downloading display overlay from goodtft/LCD-show"
+OVERLAY_FILE="$(mktemp)"
+trap 'rm -f "$OVERLAY_FILE"' EXIT
+curl -fsSL "$OVERLAY_URL" -o "$OVERLAY_FILE"
+echo "$OVERLAY_SHA256  $OVERLAY_FILE" | sha256sum -c --quiet
+
 echo "==> copying dashboard + binaries"
-scp -q pi/dashboard.py pi/fb_display.py pi/touch.py pi/assets/tft35a.dtbo \
+scp -q "$OVERLAY_FILE" "$HOST:~/$REMOTE_DIR/tft35a.dtbo"
+scp -q pi/dashboard.py pi/fb_display.py pi/touch.py \
     "$BIN_DIR/daemon" "$BIN_DIR/reporter" \
     "$HOST:~/$REMOTE_DIR/"
 
@@ -55,7 +67,7 @@ if ssh "$HOST" "grep -q '^dtoverlay=tft35a' /boot/firmware/config.txt"; then
   echo "    config.txt already has the tft35a overlay"
 else
   echo "    adding tft35a overlay to config.txt"
-  ssh "$HOST" "printf '\n# Elegoo 3.5\" SPI touchscreen (ILI9486 + XPT2046 touch) -- vendor-tuned\n# gamma/init overlay from goodtft/LCD-show (see pi/assets/tft35a.dtbo).\n# rotate=0: kernel-level rotate=90 is buggy on this driver/kernel combo\n# (corrupts the frame), so rotation is done in software instead, in\n# fb_display.py.\ndtoverlay=tft35a:rotate=0\n' | sudo tee -a /boot/firmware/config.txt > /dev/null"
+  ssh "$HOST" "printf '\n# Elegoo 3.5\" SPI touchscreen (ILI9486 + XPT2046 touch) -- vendor-tuned\n# gamma/init overlay from goodtft/LCD-show (usr/tft35a-overlay.dtb).\n# rotate=0: kernel-level rotate=90 is buggy on this driver/kernel combo\n# (corrupts the frame), so rotation is done in software instead, in\n# fb_display.py.\ndtoverlay=tft35a:rotate=0\n' | sudo tee -a /boot/firmware/config.txt > /dev/null"
   REBOOT_NEEDED=1
 fi
 
