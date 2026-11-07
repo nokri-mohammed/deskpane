@@ -50,7 +50,8 @@ What the installer does on the Pi:
 - The program files in `/opt/deskpane` belong to root. The service user cannot
   change them.
 - The local socket between the daemon and the dashboard is in `/run/deskpane/`.
-  Only the `deskpane` user can open it.
+  Only the `deskpane` user can open it. This hop does not use the network, so file
+  permissions are its access control and it needs no TLS.
 - The installer downloads the display driver file from one fixed commit of the vendor's
   project. It checks the file's SHA-256 hash before it writes anything to `/boot`.
 - Each release has a `SHA256SUMS` file, so you can check your downloads.

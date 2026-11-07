@@ -2,3 +2,6 @@
 **/__pycache__/
 *.pyc
 /dist
+
+# local task list, kept out of the public repo
+/docs/backlog.md

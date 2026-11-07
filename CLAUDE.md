@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-Context for working in deskpane. The README covers the "why"; this file covers how to
-work here.
+Context for working in deskpane. The README is the short pitch, CONTRIBUTING.md has the
+architecture and dev details, and this file covers how to work here.
 
 ## What it is
 
@@ -54,8 +54,13 @@ scripts/
   provision-pi.sh       builds the bundle and runs its install.sh on a Pi over SSH
 docs/
   CONTRACT.md         JSON wire shape and report limits
+  INSTALL.md          user install guide (Pi, Linux and Windows reporters)
+  HARDWARE.md         parts, pins, display driver notes
+  RECOVERY.md         recovery notes for the Pi
+  diagram/            architecture diagram source + rendered PNGs
+  media/              photos and GIFs of the real screen (README image: media/screen.jpg)
   plans/              plans, one file per topic
-  backlog.md          task list (the live list of open work)
+  backlog.md          task list, local only (in .gitignore, not in the public repo)
   TEAM.md             team diagram and involvement log
 ```
 
@@ -137,7 +142,7 @@ Executives on this project (hub plugins `architecture`, `tdd`, `review`, `patter
   others).
 - **security-specialist**: owns firewall, ports, systemd hardening and the Pi provisioning in
   `scripts/provision-pi.sh`, `deploy/install.sh` and `deploy/systemd/`.
-- **doc-updater**: keep `README.md` (layout, status), `docs/CONTRACT.md` (wire shape) and this
+- **doc-updater**: keep `README.md` (short pitch, under ~80 lines), `CONTRIBUTING.md` (layout, how it works, status), `docs/CONTRACT.md` (wire shape) and this
   file in sync with the code. Task tracking is in `docs/backlog.md`. Keep `docs/TEAM.md`
   current: diagram on team changes, a log line after each executive task.
 
@@ -151,4 +156,6 @@ Done: the two HIGH security findings (T-002 report validation, commit 6c29acc; T
 cap and expiry, commit 7fd7b50) and the private-data scrub with history rewritten (T-004).
 
 Not built yet: a one-shot report, `deskpane install` (systemd / Windows Service),
-TCP+mTLS transport, running on the real Pi and touchscreen.
+TCP+mTLS transport.
+
+v0.1.0-beta.1 was installed and run on the real Pi Zero 2 W and touchscreen on 2026-11-07.

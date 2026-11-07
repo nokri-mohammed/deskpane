@@ -75,3 +75,7 @@ flowchart TD
 | 2026-11-07 | architect | T-023: renamed to deskpane (binaries, command, paths, units, user, downloads, docs), all checks and fake-root flow pass |
 | 2026-11-07 | designer | T-024 started (capture script, concept mockups), stopped: the CEO will provide the images |
 | 2026-11-07 | architect | Beta release config: first release 0.1.0-beta.1 as a GitHub pre-release, path to 0.1.0 final documented |
+| 2026-11-07 | doc-updater | T-029: README rewritten as a short pitch (180 to 81 lines) with hook, image spot and context diagram; details moved to CONTRIBUTING.md, CONTRACT.md, SECURITY.md |
+| 2026-11-07 | architect | T-028: one-line installer get.sh (newest release incl. betas, hash check, old-install removal, port check, auto reboot, --reporter-only), same checks in install.sh, INSTALL.md quick install |
+| 2026-11-07 | security-specialist | Reviewed T-028 get.sh: caution, no must-fix, 6 cheap fixes (env hygiene, Pi --reporter-only guard, TLS error message, client unit hardening, reboot wording, leftover-files line); deferred T-030, T-031 |
+| 2026-11-07 | architect | T-028 security fixes: env hygiene (DESKPANE_DESTDIR, curl -q, fixed tmp dir), Pi guard for --reporter-only, clearer network error, client unit hardening (1.7 OK), INSTALL.md wording, RECOVERY.md note |

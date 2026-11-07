@@ -8,6 +8,17 @@ GPIO header via a 26-pin (13x2) socket. This is normal for this size of board, n
 a wiring mismatch; the 40-pin header is backward-compatible with the older
 26-pin layout for the pins this board actually uses.
 
+## Parts
+
+| Part | Link |
+|---|---|
+| Raspberry Pi Zero 2 W (with a pin header) | [raspberrypi.com](https://www.raspberrypi.com/products/raspberry-pi-zero-2-w/) |
+| Elegoo 3.5" SPI touchscreen | [Elegoo manual](https://www.elegoo.com/en-gb/blogs/arduino-projects/elegoo-3-5-inch-touch-screen-for-raspberry-pi-manual) |
+| Power supply, 5 V micro USB | [The Pi Hut](https://thepihut.com/collections/raspberry-pi-power-supplies) |
+| microSD card | any reliable 8 GB or larger card |
+
+Install steps are in [INSTALL.md](INSTALL.md).
+
 ## GPIO pin table (from the official Elegoo manual)
 
 | Function | Physical pin | BCM GPIO |

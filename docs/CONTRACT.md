@@ -85,5 +85,8 @@ the table keep updating. A device silent for more than **5 minutes**
 If it reports again later, it comes back as a new device.
 
 This same JSON shape is relayed locally from the daemon to the dashboard
-over a Unix domain socket (see `README.md` → Architecture). The contract
-doesn't change, only the transport does for that last hop.
+over a Unix domain socket (see "How it works" in
+[CONTRIBUTING.md](../CONTRIBUTING.md#how-it-works)). Each line is a JSON array of
+`DeviceStatus`: the report fields plus `"online": true` or `false`, sent once a
+second. The report contract doesn't change, only the transport does for that
+last hop.
