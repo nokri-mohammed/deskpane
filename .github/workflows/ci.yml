@@ -77,4 +77,4 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --release --locked --target aarch64-unknown-linux-musl -p daemon -p reporter
       - run: scripts/package-pi-bundle.sh
-      - run: tar tzvf dist/pi-homelab-dashboard-pi-aarch64.tar.gz
+      - run: tar tzvf dist/deskpane-pi-aarch64.tar.gz

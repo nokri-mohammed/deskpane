@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for your interest in pi-homelab-dashboard. This file tells you how to build the
+Thank you for your interest in deskpane. This file tells you how to build the
 project, how to test it and which rules a change must follow.
 
 For a security problem, do not open an issue. See [SECURITY.md](SECURITY.md).
@@ -53,17 +53,18 @@ cargo build --release --locked --target aarch64-unknown-linux-musl -p daemon -p 
 scripts/package-pi-bundle.sh
 ```
 
-The bundle goes to `dist/pi-homelab-dashboard-pi-aarch64.tar.gz`.
+The bundle goes to `dist/deskpane-pi-aarch64.tar.gz`.
 
 To run the daemon and a reporter on your own computer:
 
 ```bash
-cargo run -p daemon
-cargo run -p reporter -- run --daemon 127.0.0.1:8765 --device-id dev --label Dev
+SOCKET_PATH=/tmp/deskpane.sock cargo run -p daemon
+cargo run -p reporter -- report --daemon 127.0.0.1:8765 --device-id dev --label Dev
 ```
 
 The daemon reads three environment variables: `LISTEN_ADDR` (default `0.0.0.0:8765`),
-`SOCKET_PATH` (default `/tmp/pi-homelab-dashboard.sock`) and `PROTOCOL` (only `udp` works).
+`SOCKET_PATH` (default `/run/deskpane/daemon.sock`, which only exists on an installed Pi, so set
+it to a path in `/tmp` on your own computer) and `PROTOCOL` (only `udp` works).
 
 ## Commit messages and versions
 
@@ -104,6 +105,8 @@ for examples.
 1. **No shorthand.** Store the result of every call that can fail, then `match` on it. Do not
    use `if let`, `while let`, `?`, `.expect()`, `unwrap_or`, `unwrap_or_else`, `map_or` or
    struct field init shorthand (write `socket: socket`). Use `.unwrap()` in tests only.
+   One exception: when unpacking a struct or enum in a `match` arm, keep the short form
+   (`Command::Report { daemon, label }`), because rustc warns on the long one.
 
    ```rust
    // bind the socket; fatal if it fails

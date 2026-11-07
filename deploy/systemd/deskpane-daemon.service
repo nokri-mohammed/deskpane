@@ -1,22 +1,22 @@
 # Receives UDP reports from every device and serves the latest status to the
 # dashboard over a Unix socket. Installed by deploy/install.sh.
 [Unit]
-Description=pi-homelab-dashboard report daemon
+Description=deskpane report daemon
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi-homelab
-Group=pi-homelab
+User=deskpane
+Group=deskpane
 # LISTEN_ADDR (and the reporter's DEVICE_ID, LABEL) live here; upgrades never overwrite it
-EnvironmentFile=-/etc/pi-homelab-dashboard/env
-# the socket lives in /run/pi-homelab-dashboard (created by systemd), readable by this user only
-RuntimeDirectory=pi-homelab-dashboard
+EnvironmentFile=-/etc/deskpane/env
+# the socket lives in /run/deskpane (created by systemd), readable by this user only
+RuntimeDirectory=deskpane
 RuntimeDirectoryMode=0750
 UMask=0077
-Environment=SOCKET_PATH=/run/pi-homelab-dashboard/daemon.sock
-ExecStart=/opt/pi-homelab-dashboard/current/bin/daemon
+Environment=SOCKET_PATH=/run/deskpane/daemon.sock
+ExecStart=/opt/deskpane/current/bin/deskpane-daemon
 Restart=always
 RestartSec=2
 

@@ -6,7 +6,7 @@
 [Unit]
 Description=Unbind text console from the touchscreen framebuffer
 After=systemd-udev-settle.service
-Before=homelab-dashboard.service
+Before=deskpane-dashboard.service
 Wants=systemd-udev-settle.service
 
 [Service]

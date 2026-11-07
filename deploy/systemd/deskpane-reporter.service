@@ -1,18 +1,18 @@
 # Reports the Pi's own stats to the daemon on the same Pi. Installed by
 # deploy/install.sh.
 [Unit]
-Description=pi-homelab-dashboard reporter (reports the Pi's own stats)
-After=network-online.target homelab-daemon.service
+Description=deskpane reporter (reports the Pi's own stats)
+After=network-online.target deskpane-daemon.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi-homelab
-Group=pi-homelab
+User=deskpane
+Group=deskpane
 # DEVICE_ID and LABEL come from here
-EnvironmentFile=/etc/pi-homelab-dashboard/env
+EnvironmentFile=/etc/deskpane/env
 # ${VAR} (with braces) stays one argument, so a label with spaces works
-ExecStart=/opt/pi-homelab-dashboard/current/bin/reporter run --daemon 127.0.0.1:8765 --device-id ${DEVICE_ID} --label ${LABEL} --interval 2
+ExecStart=/opt/deskpane/current/bin/deskpane report --daemon 127.0.0.1:8765 --device-id ${DEVICE_ID} --label ${LABEL} --interval 2
 Restart=always
 RestartSec=2
 

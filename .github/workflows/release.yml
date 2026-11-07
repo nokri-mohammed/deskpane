@@ -60,7 +60,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pi-bundle
-          path: dist/pi-homelab-dashboard-pi-aarch64.tar.gz
+          path: dist/deskpane-pi-aarch64.tar.gz
           if-no-files-found: error
 
   build-reporter:
@@ -71,15 +71,15 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
-            archive: reporter-linux-x86_64
+            archive: deskpane-linux-x86_64
             os: linux
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
-            archive: reporter-linux-aarch64
+            archive: deskpane-linux-aarch64
             os: linux
           - target: x86_64-pc-windows-gnu
             runner: ubuntu-latest
-            archive: reporter-windows-x86_64
+            archive: deskpane-windows-x86_64
             os: windows
     runs-on: ${{ matrix.runner }}
     steps:
@@ -102,7 +102,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --target "$TARGET" -p reporter
 
-      # one top-level directory per archive: reporter-<version>-<os>-<arch>/
+      # one top-level directory per archive: deskpane-<version>-<os>-<arch>/
       - name: Package
         env:
           TAG: ${{ needs.release-please.outputs.tag_name }}
@@ -111,16 +111,16 @@ jobs:
           OS: ${{ matrix.os }}
         run: |
           version="${TAG#v}"
-          top="${ARCHIVE/reporter-/reporter-$version-}"
+          top="${ARCHIVE/deskpane-/deskpane-$version-}"
           mkdir -p "stage/$top" dist
           cp LICENSE "stage/$top/"
           if [[ "$OS" == windows ]]; then
-            cp "target/$TARGET/release/reporter.exe" "stage/$top/"
-            printf 'reporter %s for Windows\r\n\r\nExample: reporter.exe run --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"\r\n' "$version" >"stage/$top/README.txt"
+            cp "target/$TARGET/release/deskpane.exe" "stage/$top/"
+            printf 'deskpane %s for Windows\r\n\r\nExample: deskpane.exe report --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"\r\n' "$version" >"stage/$top/README.txt"
             (cd stage && zip -9 -r "../dist/$ARCHIVE.zip" "$top")
           else
-            cp "target/$TARGET/release/reporter" "stage/$top/"
-            printf 'reporter %s for Linux (static binary)\n\nExample: ./reporter run --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"\n' "$version" >"stage/$top/README.txt"
+            cp "target/$TARGET/release/deskpane" "stage/$top/"
+            printf 'deskpane %s for Linux (static binary)\n\nExample: ./deskpane report --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"\n' "$version" >"stage/$top/README.txt"
             tar -C stage -czf "dist/$ARCHIVE.tar.gz" "$top"
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

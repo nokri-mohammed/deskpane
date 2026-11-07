@@ -1,4 +1,4 @@
-# pi-homelab-dashboard
+# deskpane
 
 A Raspberry Pi Zero 2 W drives a small Elegoo 3.5" SPI touchscreen (an
 LCD35 clone: ILI9486 display, XPT2046 touch) showing live stats, not
@@ -99,7 +99,7 @@ Working today:
   15 s of silence, keeps at most 32 devices and forgets a device after
   5 minutes of silence. Builds and runs; tested end-to-end with a fake UDP
   report in dev.
-- `reporter/`: CLI (`clap`), `reporter run --daemon <addr> --device-id
+- `reporter/`: CLI (`clap`), `deskpane report --daemon <addr> --device-id
   <id> --label <name> [--interval <secs>]` reads real stats via `sysinfo`
   (CPU/RAM/disk/CPU temperature/hostname/uptime) and loops, pushing over UDP. Tested
   end-to-end against the daemon with real stats from this dev machine.
@@ -114,8 +114,8 @@ Working today:
   `/dev/fb1`, not yet confirmed on the real touchscreen.
 
 Not built yet:
-- `reporter report` (one-shot) and `reporter install`/`uninstall`
-  (systemd unit on Linux, Windows Service on Windows): `run` is the only
+- a one-shot report and `deskpane install`/`uninstall` (systemd unit on
+  Linux, Windows Service on Windows): `report` (a loop) is the only
   subcommand so far.
 - TCP+mTLS transport for the daemon (`PROTOCOL` currently only supports
   `udp`).
@@ -145,9 +145,9 @@ attaches them with a `SHA256SUMS` file and publishes the release:
 
 | File | For |
 |---|---|
-| `pi-homelab-dashboard-pi-aarch64.tar.gz` | the Pi: daemon, reporter, dashboard, systemd units, `install.sh` (64-bit Raspberry Pi OS Bookworm or later) |
-| `reporter-linux-x86_64.tar.gz`, `reporter-linux-aarch64.tar.gz` | other Linux machines (static binaries) |
-| `reporter-windows-x86_64.zip` | Windows |
+| `deskpane-pi-aarch64.tar.gz` | the Pi: daemon, reporter, dashboard, systemd units, `install.sh` (64-bit Raspberry Pi OS Bookworm or later) |
+| `deskpane-linux-x86_64.tar.gz`, `deskpane-linux-aarch64.tar.gz` | other Linux machines (static binaries) |
+| `deskpane-windows-x86_64.zip` | Windows |
 | `SHA256SUMS` | checking the downloads |
 
 The display overlay is not in the bundle (its vendor repo has no license); `install.sh`
@@ -161,11 +161,11 @@ Python compile check, and a trial build of the Pi bundle.
 ## Setup (once the above is built)
 
 1. Build and run `daemon/` from the workspace root:
-   `cargo run -p daemon` (env vars: `LISTEN_ADDR` default `0.0.0.0:8765`,
-   `SOCKET_PATH` default `/tmp/pi-homelab-dashboard.sock`; the installed
-   systemd units use `/run/pi-homelab-dashboard/daemon.sock`).
+   `SOCKET_PATH=/tmp/deskpane.sock cargo run -p daemon` (env vars:
+   `LISTEN_ADDR` default `0.0.0.0:8765`, `SOCKET_PATH` default
+   `/run/deskpane/daemon.sock`, which the installed systemd units create).
 2. Run `pi/dashboard.py` alongside it, reading the same `SOCKET_PATH`.
-3. On each reporting device: `cargo run -p reporter -- run --daemon
+3. On each reporting device: `cargo run -p reporter -- report --daemon
    <pi-ip>:8765 --device-id <id> --label <name>` (native build for Linux;
    cross-compiled with `mingw-w64` for Windows via
    `--target x86_64-pc-windows-gnu`). `install` for running it as a

@@ -28,7 +28,7 @@ Use placeholders such as 192.168.1.50, pi-zero and my-pc.
 
 ## Versions and hardware
 
-- pi-homelab-dashboard version (from `cat /opt/pi-homelab-dashboard/current/VERSION` on the Pi):
+- deskpane version (from `cat /opt/deskpane/current/VERSION` on the Pi):
 - Pi model (for example Pi Zero 2 W):
 - Raspberry Pi OS version (from `cat /etc/os-release`):
 - Touchscreen model:
@@ -39,9 +39,9 @@ Use placeholders such as 192.168.1.50, pi-zero and my-pc.
 
 <!--
 Paste the lines that show the problem. For example:
-  journalctl -u homelab-daemon -b --no-pager
-  journalctl -u homelab-dashboard -b --no-pager
-  journalctl -u homelab-reporter -b --no-pager
+  journalctl -u deskpane-daemon -b --no-pager
+  journalctl -u deskpane-dashboard -b --no-pager
+  journalctl -u deskpane-reporter -b --no-pager
 Remove real IP addresses and hostnames first.
 -->
 

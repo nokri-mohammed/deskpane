@@ -92,7 +92,7 @@ on screen, positioned wherever the console happened to think its cursor
 was. Confirm with `cat /sys/class/vtconsole/vtcon*/name` and
 `.../bind`: anything not `(S) dummy device` with `bind=1` is a live
 console on a real fb. Fixed with a small oneshot systemd service,
-`unbind-fbcon.service` (`deploy/systemd/`, installed by `deploy/install.sh`), that unbinds any
+`deskpane-unbind-fbcon.service` (`deploy/systemd/`, installed by `deploy/install.sh`), that unbinds any
 non-dummy vtconsole at boot, before the dashboard starts.
 
 ### Frame writes use `os.pwrite()`, not `mmap`

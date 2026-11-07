@@ -16,7 +16,7 @@ const FORGET_AFTER: Duration = Duration::from_secs(300);
 // most devices the table holds, so new device_ids cannot fill memory
 const MAX_DEVICES: usize = 32;
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8765";
-const DEFAULT_SOCKET_PATH: &str = "/tmp/pi-homelab-dashboard.sock";
+const DEFAULT_SOCKET_PATH: &str = "/run/deskpane/daemon.sock";
 
 type SharedState = Arc<RwLock<DeviceTable>>;
 

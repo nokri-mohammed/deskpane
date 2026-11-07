@@ -10,8 +10,6 @@ In this guide:
 - `192.168.1.50` is the Pi's IP address. Use your own.
 - `pi-zero` is the Pi's hostname. Use your own.
 - `my-pc` is one of your other computers.
-- `<owner>` is the GitHub account that hosts the project. Replace it in every link. (The
-  planned home is `nokri-mohammed/pi-homelab-dashboard`.)
 
 ## Contents
 
@@ -88,19 +86,19 @@ older systems and changes many settings ([HARDWARE.md](HARDWARE.md) explains why
 2. Make a new, empty folder and go into it:
 
    ```bash
-   mkdir ~/pi-homelab && cd ~/pi-homelab
+   mkdir ~/deskpane && cd ~/deskpane
    ```
 
 3. Download the Pi bundle:
 
    ```bash
-   curl -fLO https://github.com/<owner>/pi-homelab-dashboard/releases/latest/download/pi-homelab-dashboard-pi-aarch64.tar.gz
+   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/latest/download/deskpane-pi-aarch64.tar.gz
    ```
 
 4. Download the checksum file:
 
    ```bash
-   curl -fLO https://github.com/<owner>/pi-homelab-dashboard/releases/latest/download/SHA256SUMS
+   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/latest/download/SHA256SUMS
    ```
 
 5. Check the download:
@@ -109,20 +107,20 @@ older systems and changes many settings ([HARDWARE.md](HARDWARE.md) explains why
    sha256sum -c --ignore-missing SHA256SUMS
    ```
 
-   You must see `pi-homelab-dashboard-pi-aarch64.tar.gz: OK`. If you see `FAILED`, delete the
+   You must see `deskpane-pi-aarch64.tar.gz: OK`. If you see `FAILED`, delete the
    file and download it again. Do not install a file that fails this check.
 
 6. Extract the bundle:
 
    ```bash
-   tar xzf pi-homelab-dashboard-pi-aarch64.tar.gz
+   tar xzf deskpane-pi-aarch64.tar.gz
    ```
 
 7. Go into the new folder. Its name contains the version, for example
-   `pi-homelab-dashboard-0.1.0-pi-aarch64`:
+   `deskpane-0.1.0-pi-aarch64`:
 
    ```bash
-   cd pi-homelab-dashboard-*-pi-aarch64
+   cd deskpane-*-pi-aarch64
    ```
 
 8. Run the installer:
@@ -172,18 +170,18 @@ You do not need to do any of this by hand. The list is here so you know what cha
 2. It downloads the display driver file and checks its hash. If the hash is wrong, it stops
    before it changes anything.
 3. It installs `python3-pygame` and `python3-evdev` with `apt-get`.
-4. It creates a system user `pi-homelab`. This user cannot log in. The services run as this
+4. It creates a system user `deskpane`. This user cannot log in. The services run as this
    user.
-5. It copies the program to `/opt/pi-homelab-dashboard/releases/<version>/`. The link
-   `/opt/pi-homelab-dashboard/current` points to the active version.
-6. On the first install only, it writes the settings file `/etc/pi-homelab-dashboard/env`.
+5. It copies the program to `/opt/deskpane/releases/<version>/`. The link
+   `/opt/deskpane/current` points to the active version.
+6. On the first install only, it writes the settings file `/etc/deskpane/env`.
 7. It copies the display driver file to `/boot/firmware/overlays/tft35a.dtbo`.
 8. It adds a `dtoverlay=tft35a:rotate=0` block to `/boot/firmware/config.txt`.
 9. It adds `fbcon=map:1` to `/boot/firmware/cmdline.txt`. This keeps the text console off the
    touchscreen.
-10. Before its first change to a boot file, it saves a copy as `<file>.pi-homelab.bak`.
+10. Before its first change to a boot file, it saves a copy as `<file>.deskpane.bak`.
 11. It installs, turns on and starts the systemd services.
-12. It keeps the current and the previous version in `/opt/pi-homelab-dashboard/releases/`, and
+12. It keeps the current and the previous version in `/opt/deskpane/releases/`, and
     deletes older ones.
 
 With `--no-display`, the installer skips steps 2, 3, 7, 8 and 9.
@@ -198,26 +196,26 @@ To check the services, log in to the Pi again and follow these steps.
 1. Show the state of the four services:
 
    ```bash
-   systemctl status homelab-daemon homelab-dashboard homelab-reporter unbind-fbcon
+   systemctl status deskpane-daemon deskpane-dashboard deskpane-reporter deskpane-unbind-fbcon
    ```
 
-   `homelab-daemon`, `homelab-dashboard` and `homelab-reporter` must show
-   `active (running)`. `unbind-fbcon` must show `active (exited)`. That is correct for a
+   `deskpane-daemon`, `deskpane-dashboard` and `deskpane-reporter` must show
+   `active (running)`. `deskpane-unbind-fbcon` must show `active (exited)`. That is correct for a
    service that runs once at start-up.
 
 2. Check that the daemon made its socket. The dashboard reads the stats from this file:
 
    ```bash
-   sudo ls -l /run/pi-homelab-dashboard/
+   sudo ls -l /run/deskpane/
    ```
 
-   You must see `daemon.sock`. You need `sudo` because only the `pi-homelab` user can open
+   You must see `daemon.sock`. You need `sudo` because only the `deskpane` user can open
    this folder.
 
 3. Look at the daemon log:
 
    ```bash
-   journalctl -u homelab-daemon -b --no-pager
+   journalctl -u deskpane-daemon -b --no-pager
    ```
 
    You must see `udp: listening on 0.0.0.0:8765`.
@@ -226,20 +224,20 @@ The services that run depend on the installer options:
 
 | Service | What it does | Skipped with |
 |---|---|---|
-| `homelab-daemon` | Receives the reports on UDP port 8765 and keeps the latest one for each device. | (always installed) |
-| `homelab-dashboard` | Draws the pages on the touchscreen. | `--no-display` |
-| `unbind-fbcon` | Keeps the text console off the touchscreen. | `--no-display` |
-| `homelab-reporter` | Sends the Pi's own stats to the daemon. | `--no-reporter` |
+| `deskpane-daemon` | Receives the reports on UDP port 8765 and keeps the latest one for each device. | (always installed) |
+| `deskpane-dashboard` | Draws the pages on the touchscreen. | `--no-display` |
+| `deskpane-unbind-fbcon` | Keeps the text console off the touchscreen. | `--no-display` |
+| `deskpane-reporter` | Sends the Pi's own stats to the daemon. | `--no-reporter` |
 
 ## Send stats from your other computers
 
-Each computer that you want on the dashboard runs the `reporter` program. The reporter sends
+Each computer that you want on the dashboard runs the `deskpane` program. The reporter sends
 one small message to the Pi every few seconds.
 
 Each computer needs its own device id. If two computers use the same id, they overwrite each
 other on the dashboard.
 
-The reporter has one command, `run`, with these options:
+The `deskpane` program has one command, `report`, with these options:
 
 | Option | What it is |
 |---|---|
@@ -261,20 +259,20 @@ The Linux reporter is one file with no dependencies. It runs on any 64-bit Linux
    uname -m
    ```
 
-   `x86_64` means you need `reporter-linux-x86_64.tar.gz`. `aarch64` means you need
-   `reporter-linux-aarch64.tar.gz`. There is no download for 32-bit systems.
+   `x86_64` means you need `deskpane-linux-x86_64.tar.gz`. `aarch64` means you need
+   `deskpane-linux-aarch64.tar.gz`. There is no download for 32-bit systems.
 
 2. Make a new, empty folder and go into it:
 
    ```bash
-   mkdir ~/reporter && cd ~/reporter
+   mkdir ~/deskpane && cd ~/deskpane
    ```
 
 3. Download the reporter and the checksum file. This example is for `x86_64`:
 
    ```bash
-   curl -fLO https://github.com/<owner>/pi-homelab-dashboard/releases/latest/download/reporter-linux-x86_64.tar.gz
-   curl -fLO https://github.com/<owner>/pi-homelab-dashboard/releases/latest/download/SHA256SUMS
+   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/latest/download/deskpane-linux-x86_64.tar.gz
+   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/latest/download/SHA256SUMS
    ```
 
 4. Check the download. You must see `OK`:
@@ -286,19 +284,19 @@ The Linux reporter is one file with no dependencies. It runs on any 64-bit Linux
 5. Extract it:
 
    ```bash
-   tar xzf reporter-linux-x86_64.tar.gz
+   tar xzf deskpane-linux-x86_64.tar.gz
    ```
 
 6. Copy the program to `/usr/local/bin`:
 
    ```bash
-   sudo install -m 0755 reporter-*-linux-x86_64/reporter /usr/local/bin/reporter
+   sudo install -m 0755 deskpane-*-linux-x86_64/deskpane /usr/local/bin/deskpane
    ```
 
 7. Start it. Use your Pi's IP address:
 
    ```bash
-   reporter run --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"
+   deskpane report --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"
    ```
 
    It prints `reporter: pushing to 192.168.1.50:8765 as 'my-pc' every 4s`. Your computer shows
@@ -310,12 +308,12 @@ The Linux reporter is one file with no dependencies. It runs on any 64-bit Linux
 
 The reporter cannot install itself as a service yet. You can add a systemd service by hand.
 
-1. Create the file `/etc/systemd/system/homelab-reporter.service` with this text. Change the
+1. Create the file `/etc/systemd/system/deskpane-reporter.service` with this text. Change the
    address, id and label:
 
    ```ini
    [Unit]
-   Description=pi-homelab-dashboard reporter
+   Description=deskpane reporter
    After=network-online.target
    Wants=network-online.target
 
@@ -323,7 +321,7 @@ The reporter cannot install itself as a service yet. You can add a systemd servi
    Type=simple
    # a throwaway user with no rights; the reporter only reads system stats
    DynamicUser=yes
-   ExecStart=/usr/local/bin/reporter run --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"
+   ExecStart=/usr/local/bin/deskpane report --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"
    Restart=always
    RestartSec=5
 
@@ -340,36 +338,36 @@ The reporter cannot install itself as a service yet. You can add a systemd servi
 3. Turn on the service and start it:
 
    ```bash
-   sudo systemctl enable --now homelab-reporter
+   sudo systemctl enable --now deskpane-reporter
    ```
 
 4. Check it:
 
    ```bash
-   systemctl status homelab-reporter
+   systemctl status deskpane-reporter
    ```
 
 ### Windows
 
-1. Download `reporter-windows-x86_64.zip` and `SHA256SUMS` from
-   `https://github.com/<owner>/pi-homelab-dashboard/releases/latest`.
+1. Download `deskpane-windows-x86_64.zip` and `SHA256SUMS` from
+   `https://github.com/nokri-mohammed/deskpane/releases/latest`.
 2. Open PowerShell in your Downloads folder.
 3. Show the hash of the zip file:
 
    ```powershell
-   Get-FileHash .\reporter-windows-x86_64.zip -Algorithm SHA256
+   Get-FileHash .\deskpane-windows-x86_64.zip -Algorithm SHA256
    ```
 
-4. Open `SHA256SUMS` in Notepad. Find the line for `reporter-windows-x86_64.zip`. The hash on
+4. Open `SHA256SUMS` in Notepad. Find the line for `deskpane-windows-x86_64.zip`. The hash on
    that line must be the same as the one PowerShell shows (PowerShell uses capital letters,
    which is fine).
 5. Right-click the zip file and choose **Extract All**.
 6. Open PowerShell in the extracted folder. Its name is like
-   `reporter-0.1.0-windows-x86_64`.
+   `deskpane-0.1.0-windows-x86_64`.
 7. Start the reporter. Use your Pi's IP address:
 
    ```powershell
-   .\reporter.exe run --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"
+   .\deskpane.exe report --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"
    ```
 
 8. Keep the window open. The reporter stops when you close it.
@@ -386,15 +384,15 @@ To start the reporter when you log in, use Task Scheduler:
 2. Choose **Create Basic Task**.
 3. Set the trigger to **When I log on**.
 4. Set the action to **Start a program**.
-5. In **Program/script**, select `reporter.exe`.
-6. In **Add arguments**, type `run --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"`.
+5. In **Program/script**, select `deskpane.exe`.
+6. In **Add arguments**, type `report --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"`.
 7. Finish the task.
 
 A reporter that runs as a Windows service is planned for a later version.
 
 ## Change the settings
 
-The settings are in `/etc/pi-homelab-dashboard/env` on the Pi. An upgrade never changes this
+The settings are in `/etc/deskpane/env` on the Pi. An upgrade never changes this
 file.
 
 | Setting | What it does | Default |
@@ -406,14 +404,14 @@ file.
 1. Open the file:
 
    ```bash
-   sudo nano /etc/pi-homelab-dashboard/env
+   sudo nano /etc/deskpane/env
    ```
 
 2. Change the values and save the file.
 3. Restart the services:
 
    ```bash
-   sudo systemctl restart homelab-daemon homelab-reporter
+   sudo systemctl restart deskpane-daemon deskpane-reporter
    ```
 
 **Caution:** the Pi's own reporter always sends to port 8765. If you change the port in
@@ -427,7 +425,7 @@ To upgrade, run the `install.sh` of a newer bundle. Your settings stay the same.
 1. Make a new, empty folder for the new version, and go into it:
 
    ```bash
-   mkdir ~/pi-homelab-new && cd ~/pi-homelab-new
+   mkdir ~/deskpane-new && cd ~/deskpane-new
    ```
 
 2. Download, check and extract the new bundle. Use steps 3 to 7 of
@@ -446,7 +444,7 @@ effect on an upgrade. To change them, edit the settings file (see
 [Change the settings](#change-the-settings)).
 
 **Note:** use a new folder for each version. If two extracted bundles are in the same folder,
-`cd pi-homelab-dashboard-*-pi-aarch64` can go into the wrong one.
+`cd deskpane-*-pi-aarch64` can go into the wrong one.
 
 ## Roll back to the previous version
 
@@ -456,19 +454,19 @@ rollback command.
 1. List the versions on the Pi:
 
    ```bash
-   ls /opt/pi-homelab-dashboard/releases
+   ls /opt/deskpane/releases
    ```
 
 2. Point `current` at the older version. Replace `0.1.0` with the version that you want:
 
    ```bash
-   sudo ln -sfn releases/0.1.0 /opt/pi-homelab-dashboard/current
+   sudo ln -sfn releases/0.1.0 /opt/deskpane/current
    ```
 
 3. Restart the services:
 
    ```bash
-   sudo systemctl restart homelab-daemon homelab-dashboard homelab-reporter
+   sudo systemctl restart deskpane-daemon deskpane-dashboard deskpane-reporter
    ```
 
 You can also run the `install.sh` of the older bundle. That works the same as an upgrade.
@@ -481,7 +479,7 @@ the folder, download and extract the bundle again.
 1. Go into the extracted bundle folder:
 
    ```bash
-   cd ~/pi-homelab/pi-homelab-dashboard-*-pi-aarch64
+   cd ~/deskpane/deskpane-*-pi-aarch64
    ```
 
 2. Run the uninstaller:
@@ -490,8 +488,8 @@ the folder, download and extract the bundle again.
    sudo ./uninstall.sh
    ```
 
-   This stops and removes the services. It deletes `/opt/pi-homelab-dashboard`. It keeps
-   your settings, the `pi-homelab` user, the display driver file and the boot settings. A
+   This stops and removes the services. It deletes `/opt/deskpane`. It keeps
+   your settings, the `deskpane` user, the display driver file and the boot settings. A
    later install continues from there.
 
 3. To remove everything, run it with `--purge` instead:
@@ -500,7 +498,7 @@ the folder, download and extract the bundle again.
    sudo ./uninstall.sh --purge
    ```
 
-   This also removes `/etc/pi-homelab-dashboard`, the `pi-homelab` user and the display driver
+   This also removes `/etc/deskpane`, the `deskpane` user and the display driver
    file. It removes the installer's lines from `config.txt` and `cmdline.txt`.
 
 4. Restart the Pi if the uninstaller tells you to:
@@ -510,20 +508,20 @@ the folder, download and extract the bundle again.
    ```
 
 `--purge` does not remove `python3-pygame` or `python3-evdev`. It does not delete the backup
-copies `/boot/firmware/*.pi-homelab.bak`.
+copies `/boot/firmware/*.deskpane.bak`.
 
 To remove the reporter from a Linux computer, stop your service if you made one. Then delete
-`/usr/local/bin/reporter`. On Windows, delete the folder and the Task Scheduler task.
+`/usr/local/bin/deskpane`. On Windows, delete the folder and the Task Scheduler task.
 
 ## Troubleshooting
 
 To see the logs of a service, use `journalctl`. Add `-f` to follow new lines as they come.
 
 ```bash
-journalctl -u homelab-daemon -b --no-pager       # daemon, since the last start
-journalctl -u homelab-dashboard -b --no-pager    # touchscreen program
-journalctl -u homelab-reporter -b --no-pager     # the Pi's own reporter
-journalctl -u homelab-daemon -f                  # daemon, live
+journalctl -u deskpane-daemon -b --no-pager       # daemon, since the last start
+journalctl -u deskpane-dashboard -b --no-pager    # touchscreen program
+journalctl -u deskpane-reporter -b --no-pager     # the Pi's own reporter
+journalctl -u deskpane-daemon -f                  # daemon, live
 ```
 
 ### The installer stops with an error
@@ -543,13 +541,13 @@ journalctl -u homelab-daemon -f                  # daemon, live
 2. Check the dashboard service:
 
    ```bash
-   systemctl status homelab-dashboard unbind-fbcon
+   systemctl status deskpane-dashboard deskpane-unbind-fbcon
    ```
 
 3. Read the dashboard log for errors:
 
    ```bash
-   journalctl -u homelab-dashboard -b --no-pager
+   journalctl -u deskpane-dashboard -b --no-pager
    ```
 
 4. Check that the boot settings are there:
@@ -571,7 +569,7 @@ journalctl -u homelab-daemon -f                  # daemon, live
 dashboard on purpose. Start it again:
 
 ```bash
-sudo systemctl start homelab-dashboard
+sudo systemctl start deskpane-dashboard
 ```
 
 **The colours look pale or grey.** See [HARDWARE.md](HARDWARE.md). That file explains the
@@ -580,11 +578,11 @@ vendor display driver and the known symptoms.
 ### Text or a blinking cursor shows on the touchscreen
 
 The installer keeps the text console off the touchscreen in two ways: `fbcon=map:1` in
-`cmdline.txt`, and the `unbind-fbcon` service. Check both:
+`cmdline.txt`, and the `deskpane-unbind-fbcon` service. Check both:
 
 ```bash
 grep fbcon /boot/firmware/cmdline.txt
-systemctl status unbind-fbcon
+systemctl status deskpane-unbind-fbcon
 ```
 
 Because of this, the touchscreen never shows a login prompt. An HDMI monitor does not show one
@@ -601,9 +599,9 @@ start-up can take that name. Disconnect it and restart the Pi.
 The daemon is not running, or the dashboard cannot open its socket.
 
 ```bash
-systemctl status homelab-daemon
-sudo ls -l /run/pi-homelab-dashboard/
-journalctl -u homelab-daemon -b --no-pager
+systemctl status deskpane-daemon
+sudo ls -l /run/deskpane/
+journalctl -u deskpane-daemon -b --no-pager
 ```
 
 ### A computer does not show on the dashboard
@@ -623,7 +621,7 @@ journalctl -u homelab-daemon -b --no-pager
 4. Watch the daemon log on the Pi while the reporter runs:
 
    ```bash
-   journalctl -u homelab-daemon -f
+   journalctl -u deskpane-daemon -f
    ```
 
    Look for these lines:
@@ -644,8 +642,8 @@ minutes. That frees its slot in the table of 32 devices.
 ### The Pi's own stats do not show
 
 ```bash
-systemctl status homelab-reporter
-cat /etc/pi-homelab-dashboard/env
+systemctl status deskpane-reporter
+cat /etc/deskpane/env
 ```
 
 If you installed with `--no-reporter`, this service is not installed. Run `install.sh` again

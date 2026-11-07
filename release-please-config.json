@@ -8,7 +8,7 @@
   "force-tag-creation": true,
   "packages": {
     ".": {
-      "package-name": "pi-homelab-dashboard",
+      "package-name": "deskpane",
       "changelog-path": "CHANGELOG.md",
       "initial-version": "0.1.0",
       "extra-files": [

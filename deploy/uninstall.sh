@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Removes pi-homelab-dashboard from this Pi. By default it keeps the settings in
-# /etc/pi-homelab-dashboard, the pi-homelab user, the display overlay and the
+# Removes deskpane from this Pi. By default it keeps the settings in
+# /etc/deskpane, the deskpane user, the display overlay and the
 # boot config lines, so a later install.sh picks up where it left off.
 #
 # Usage: sudo ./uninstall.sh [--purge]
@@ -9,13 +9,13 @@
 # DESTDIR (empty by default) prefixes every file path, for testing in a fake root.
 set -euo pipefail
 
-PREFIX=/opt/pi-homelab-dashboard
-CONFIG_DIR=/etc/pi-homelab-dashboard
+PREFIX=/opt/deskpane
+CONFIG_DIR=/etc/deskpane
 UNIT_DIR=/etc/systemd/system
 BOOT_DIR=/boot/firmware
-SERVICE_USER=pi-homelab
+SERVICE_USER=deskpane
 DESTDIR="${DESTDIR:-}"
-UNITS=(homelab-reporter.service homelab-dashboard.service unbind-fbcon.service homelab-daemon.service)
+UNITS=(deskpane-reporter.service deskpane-dashboard.service deskpane-unbind-fbcon.service deskpane-daemon.service)
 
 # print a step or an error and stop
 say() { echo "==> $*"; }
@@ -72,7 +72,7 @@ CONFIG_TXT="$DESTDIR$BOOT_DIR/config.txt"
 if [[ -f "$CONFIG_TXT" ]] && grep -q '^dtoverlay=tft35a' "$CONFIG_TXT"; then
   say "removing the tft35a overlay from config.txt"
   # drop the marked block (install.sh) and any bare tft35a line (older provisioning)
-  sed -e '/^# >>> pi-homelab-dashboard$/,/^# <<< pi-homelab-dashboard$/d' \
+  sed -e '/^# >>> deskpane$/,/^# <<< deskpane$/d' \
     -e '/^dtoverlay=tft35a/d' "$CONFIG_TXT" >"$CONFIG_TXT.new"
   mv -f "$CONFIG_TXT.new" "$CONFIG_TXT"
   sync
@@ -87,7 +87,7 @@ if [[ -f "$CMDLINE_TXT" ]] && grep -qw 'fbcon=map:1' "$CMDLINE_TXT"; then
   REBOOT_NEEDED=1
 fi
 
-say "done. Backups of the original boot files, if any, are in $BOOT_DIR/*.pi-homelab.bak"
+say "done. Backups of the original boot files, if any, are in $BOOT_DIR/*.deskpane.bak"
 if [[ "$REBOOT_NEEDED" -eq 1 ]]; then
   echo "Reboot to apply the boot config change: sudo systemctl reboot"
 fi

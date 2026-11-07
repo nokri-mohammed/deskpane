@@ -19,7 +19,7 @@ import pygame
 from fb_display import FrameBuffer, detect_touchscreen_fb
 from touch import TouchWatcher
 
-SOCKET_PATH = os.environ.get("SOCKET_PATH", "/tmp/pi-homelab-dashboard.sock")
+SOCKET_PATH = os.environ.get("SOCKET_PATH", "/run/deskpane/daemon.sock")
 FB_PATH = os.environ.get("FB_PATH") or detect_touchscreen_fb() or "/dev/fb1"
 
 # A full 320x480 RGB565 frame (307KB) takes ~150ms to physically transfer

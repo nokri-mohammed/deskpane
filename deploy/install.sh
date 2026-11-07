@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs or upgrades pi-homelab-dashboard on a Raspberry Pi from an extracted
+# Installs or upgrades deskpane on a Raspberry Pi from an extracted
 # release bundle. Safe to run again: running a newer bundle's install.sh is the
 # upgrade. Needs 64-bit Raspberry Pi OS Bookworm or later.
 #
@@ -8,17 +8,17 @@
 # DESTDIR (empty by default) prefixes every file path, for testing in a fake root.
 set -euo pipefail
 
-PREFIX=/opt/pi-homelab-dashboard
-CONFIG_DIR=/etc/pi-homelab-dashboard
+PREFIX=/opt/deskpane
+CONFIG_DIR=/etc/deskpane
 UNIT_DIR=/etc/systemd/system
 BOOT_DIR=/boot/firmware
-SERVICE_USER=pi-homelab
+SERVICE_USER=deskpane
 DESTDIR="${DESTDIR:-}"
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # markers around the lines we add to config.txt, so uninstall.sh can find them
-MARK_BEGIN="# >>> pi-homelab-dashboard"
-MARK_END="# <<< pi-homelab-dashboard"
+MARK_BEGIN="# >>> deskpane"
+MARK_END="# <<< deskpane"
 
 # print a step, a warning, or an error and stop
 say() { echo "==> $*"; }
@@ -52,10 +52,10 @@ read_key() {
   sed -n "s/^$1=//p" "$2" | head -n 1
 }
 
-# copy a boot file to <file>.pi-homelab.bak once, before our first change to it
+# copy a boot file to <file>.deskpane.bak once, before our first change to it
 backup_once() {
-  if [[ ! -f "$1.pi-homelab.bak" ]]; then
-    cp -p "$1" "$1.pi-homelab.bak"
+  if [[ ! -f "$1.deskpane.bak" ]]; then
+    cp -p "$1" "$1.deskpane.bak"
   fi
 }
 
@@ -102,10 +102,10 @@ fi
 if [[ "$WITH_DISPLAY" -eq 1 && ! -f "$DESTDIR$BOOT_DIR/config.txt" ]]; then
   die "$BOOT_DIR/config.txt not found: Raspberry Pi OS Bookworm or later is required (or use --no-display)"
 fi
-for f in VERSION LICENSE overlay.env config/env.example bin/daemon bin/reporter \
+for f in VERSION LICENSE overlay.env config/env.example bin/deskpane-daemon bin/deskpane \
   dashboard/dashboard.py dashboard/fb_display.py dashboard/touch.py \
-  systemd/homelab-daemon.service systemd/homelab-dashboard.service \
-  systemd/homelab-reporter.service systemd/unbind-fbcon.service; do
+  systemd/deskpane-daemon.service systemd/deskpane-dashboard.service \
+  systemd/deskpane-reporter.service systemd/deskpane-unbind-fbcon.service; do
   [[ -f "$BUNDLE_DIR/$f" ]] || die "bundle is incomplete: $f is missing"
 done
 VERSION="$(tr -d '[:space:]' <"$BUNDLE_DIR/VERSION")"
@@ -179,7 +179,7 @@ RELEASE_DIR="$RELEASES/$VERSION"
 say "installing version $VERSION to $PREFIX/releases/$VERSION"
 rm -rf "$RELEASE_DIR.new"
 install -d -m 0755 "$RELEASE_DIR.new/bin" "$RELEASE_DIR.new/dashboard"
-install -m 0755 "$BUNDLE_DIR/bin/daemon" "$BUNDLE_DIR/bin/reporter" "$RELEASE_DIR.new/bin/"
+install -m 0755 "$BUNDLE_DIR/bin/deskpane-daemon" "$BUNDLE_DIR/bin/deskpane" "$RELEASE_DIR.new/bin/"
 install -m 0644 "$BUNDLE_DIR"/dashboard/*.py "$RELEASE_DIR.new/dashboard/"
 install -m 0644 "$BUNDLE_DIR/VERSION" "$BUNDLE_DIR/LICENSE" "$RELEASE_DIR.new/"
 rm -rf "$RELEASE_DIR"
@@ -276,12 +276,12 @@ if [[ "$WITH_DISPLAY" -eq 1 ]]; then
 fi
 
 # which units this install runs
-UNITS=(homelab-daemon.service)
+UNITS=(deskpane-daemon.service)
 if [[ "$WITH_DISPLAY" -eq 1 ]]; then
-  UNITS+=(unbind-fbcon.service homelab-dashboard.service)
+  UNITS+=(deskpane-unbind-fbcon.service deskpane-dashboard.service)
 fi
 if [[ "$WITH_REPORTER" -eq 1 ]]; then
-  UNITS+=(homelab-reporter.service)
+  UNITS+=(deskpane-reporter.service)
 fi
 
 # install, enable, and restart (restart so an upgrade runs the new binaries)
@@ -293,7 +293,7 @@ done
 systemctl daemon-reload
 
 # a unit from an earlier install that this run did not select (e.g. --no-reporter) is stopped
-for unit in homelab-daemon.service unbind-fbcon.service homelab-dashboard.service homelab-reporter.service; do
+for unit in deskpane-daemon.service deskpane-unbind-fbcon.service deskpane-dashboard.service deskpane-reporter.service; do
   selected=0
   for wanted in "${UNITS[@]}"; do
     if [[ "$unit" == "$wanted" ]]; then
@@ -309,7 +309,7 @@ done
 systemctl enable "${UNITS[@]}"
 for unit in "${UNITS[@]}"; do
   # the touchscreen only exists after the reboot, so do not start the dashboard yet
-  if [[ "$REBOOT_NEEDED" -eq 1 && ("$unit" == homelab-dashboard.service || "$unit" == unbind-fbcon.service) ]]; then
+  if [[ "$REBOOT_NEEDED" -eq 1 && ("$unit" == deskpane-dashboard.service || "$unit" == deskpane-unbind-fbcon.service) ]]; then
     continue
   fi
   systemctl restart "$unit"
@@ -326,7 +326,7 @@ done
 
 # summary
 echo
-say "pi-homelab-dashboard $VERSION installed"
+say "deskpane $VERSION installed"
 systemctl --no-pager --lines=0 status "${UNITS[@]}" || true
 PI_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 if [[ -z "$PI_IP" ]]; then
@@ -334,7 +334,7 @@ if [[ -z "$PI_IP" ]]; then
 fi
 echo
 echo "On every other machine, run the reporter pointed at this Pi, for example:"
-echo "  reporter run --daemon $PI_IP:8765 --device-id my-pc --label \"My PC\""
+echo "  deskpane report --daemon $PI_IP:8765 --device-id my-pc --label \"My PC\""
 if [[ -n "$PREVIOUS" && "$PREVIOUS" != "$VERSION" ]]; then
   echo "Rollback: sudo ln -sfn releases/$PREVIOUS $PREFIX/current && sudo systemctl restart ${UNITS[*]}"
 fi

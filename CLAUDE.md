@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Context for working in pi-homelab-dashboard. The README covers the "why"; this file covers how to
+Context for working in deskpane. The README covers the "why"; this file covers how to
 work here.
 
 ## What it is
@@ -43,14 +43,14 @@ pi/
   fb_display.py       framebuffer drawing
   touch.py            evdev tap watcher
 deploy/
-  systemd/*.service   the four units the Pi bundle installs (static, user pi-homelab)
+  systemd/*.service   the four units the Pi bundle installs (static, user deskpane)
   install.sh          installs or upgrades the Pi bundle (runs as root on the Pi)
   uninstall.sh        removes it (--purge also removes settings, user, boot lines)
   overlay.env         pinned display overlay URL + SHA-256 (the overlay is never shipped)
-  env.example         becomes /etc/pi-homelab-dashboard/env on first install
+  env.example         becomes /etc/deskpane/env on first install
   README.txt          bundle readme
 scripts/
-  package-pi-bundle.sh  builds dist/pi-homelab-dashboard-pi-aarch64.tar.gz
+  package-pi-bundle.sh  builds dist/deskpane-pi-aarch64.tar.gz
   provision-pi.sh       builds the bundle and runs its install.sh on a Pi over SSH
 docs/
   CONTRACT.md         JSON wire shape and report limits
@@ -59,7 +59,9 @@ docs/
   TEAM.md             team diagram and involvement log
 ```
 
-`reporter` depends on `daemon` as a library for the contract types and `UdpClient`.
+`reporter` depends on `daemon` as a library for the contract types and `UdpClient`. The crates
+and directories keep the names `daemon` and `reporter`; the binaries they build are
+`deskpane-daemon` (Pi) and `deskpane` (client, `deskpane report ...`), set with `[[bin]] name`.
 
 ## Commands
 
@@ -74,8 +76,8 @@ scripts/package-pi-bundle.sh                                          # Pi bundl
 scripts/provision-pi.sh pi-zero                                       # bundle + install.sh on a Pi over SSH
 ~/.cargo/bin/cargo fmt --all --check                                  # CI runs these two as well
 ~/.cargo/bin/cargo clippy --workspace --all-targets --locked -- -D warnings
-~/.cargo/bin/cargo run -p daemon                                      # LISTEN_ADDR, SOCKET_PATH, PROTOCOL env vars
-~/.cargo/bin/cargo run -p reporter -- run --daemon 127.0.0.1:8765 --device-id dev --label Dev
+SOCKET_PATH=/tmp/deskpane.sock ~/.cargo/bin/cargo run -p daemon      # LISTEN_ADDR, SOCKET_PATH (default /run/deskpane/daemon.sock), PROTOCOL
+~/.cargo/bin/cargo run -p reporter -- report --daemon 127.0.0.1:8765 --device-id dev --label Dev
 ```
 
 The Windows target (`x86_64-pc-windows-gnu`) is not installed on this machine. CI and the release
@@ -91,6 +93,8 @@ All Rust here follows the `rust-patterns` skill from the claude-team hub
 
 - No shorthand: every fallible call is `let x = call(); match x { ... }`. No `if let`,
   `while let`, `?`, `.expect`, `unwrap_or_else`, iterator chains or field init shorthand.
+  Exception: destructuring a pattern (`Command::Report { daemon, label }`) keeps the short
+  form, because rustc warns on the long one.
   `.unwrap()` in tests only.
 - Comments above the code, short, one per block. Multi-line comments use `/* */`.
 - Generic plumbing goes in `services/` as small structs with unit tests. Project logic stays in
@@ -146,5 +150,5 @@ The live list is `docs/backlog.md`. Do not copy items here.
 Done: the two HIGH security findings (T-002 report validation, commit 6c29acc; T-003 device table
 cap and expiry, commit 7fd7b50) and the private-data scrub with history rewritten (T-004).
 
-Not built yet: `reporter report` (one-shot), `reporter install` (systemd / Windows Service),
+Not built yet: a one-shot report, `deskpane install` (systemd / Windows Service),
 TCP+mTLS transport, running on the real Pi and touchscreen.

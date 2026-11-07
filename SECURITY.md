@@ -12,7 +12,7 @@ problem.
 
 ## Design: for a trusted home network only
 
-pi-homelab-dashboard is made for a home network (LAN) that you trust. Do not expose it to the
+deskpane is made for a home network (LAN) that you trust. Do not expose it to the
 internet.
 
 In version 0.1.x there is no authentication and no encryption:
@@ -45,12 +45,12 @@ An authenticated transport (TCP with mutual TLS) is planned. It has no release d
 
 What the installer does on the Pi:
 
-- The daemon, the dashboard and the Pi's own reporter run as `pi-homelab`, a system user that
+- The daemon, the dashboard and the Pi's own deskpane report as `deskpane`, a system user that
   cannot log in.
-- The program files in `/opt/pi-homelab-dashboard` belong to root. The service user cannot
+- The program files in `/opt/deskpane` belong to root. The service user cannot
   change them.
-- The local socket between the daemon and the dashboard is in `/run/pi-homelab-dashboard/`.
-  Only the `pi-homelab` user can open it.
+- The local socket between the daemon and the dashboard is in `/run/deskpane/`.
+  Only the `deskpane` user can open it.
 - The installer downloads the display driver file from one fixed commit of the vendor's
   project. It checks the file's SHA-256 hash before it writes anything to `/boot`.
 - Each release has a `SHA256SUMS` file, so you can check your downloads.

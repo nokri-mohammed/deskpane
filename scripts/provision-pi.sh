@@ -47,13 +47,13 @@ echo "$OVERLAY_SHA256  $WORK_DIR/tft35a.dtbo" | sha256sum -c --quiet - ||
 echo "==> packaging the Pi bundle"
 "$REPO/scripts/package-pi-bundle.sh" --bin-dir "$BIN_DIR" --out-dir "$WORK_DIR" >/dev/null
 VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$REPO/Cargo.toml" | head -n 1)"
-TOP="pi-homelab-dashboard-$VERSION-pi-aarch64"
+TOP="deskpane-$VERSION-pi-aarch64"
 
 # copy bundle and overlay into a fresh temp directory on the Pi
 echo "==> copying to $HOST"
 REMOTE_DIR="$(ssh -o ConnectTimeout=5 "$HOST" 'mktemp -d')"
 [[ "$REMOTE_DIR" =~ ^/tmp/tmp\.[A-Za-z0-9]+$ ]] || die "unexpected remote temp dir: $REMOTE_DIR"
-scp -q "$WORK_DIR/pi-homelab-dashboard-pi-aarch64.tar.gz" "$WORK_DIR/tft35a.dtbo" "$HOST:$REMOTE_DIR/"
+scp -q "$WORK_DIR/deskpane-pi-aarch64.tar.gz" "$WORK_DIR/tft35a.dtbo" "$HOST:$REMOTE_DIR/"
 
 # extract and install; -t so sudo can ask for the password
 INSTALL_ARGS=""
@@ -61,4 +61,4 @@ if [[ $# -gt 0 ]]; then
   INSTALL_ARGS="$(printf ' %q' "$@")"
 fi
 echo "==> running install.sh on $HOST"
-ssh -t "$HOST" "cd $REMOTE_DIR && tar xzf pi-homelab-dashboard-pi-aarch64.tar.gz && sudo ./$TOP/install.sh --overlay-file $REMOTE_DIR/tft35a.dtbo$INSTALL_ARGS; status=\$?; rm -rf $REMOTE_DIR; exit \$status"
+ssh -t "$HOST" "cd $REMOTE_DIR && tar xzf deskpane-pi-aarch64.tar.gz && sudo ./$TOP/install.sh --overlay-file $REMOTE_DIR/tft35a.dtbo$INSTALL_ARGS; status=\$?; rm -rf $REMOTE_DIR; exit \$status"

@@ -1,21 +1,21 @@
 # Draws the dashboard on the touchscreen framebuffer. Installed by
 # deploy/install.sh.
 [Unit]
-Description=pi-homelab-dashboard touchscreen UI
-After=homelab-daemon.service unbind-fbcon.service
-Wants=homelab-daemon.service unbind-fbcon.service
+Description=deskpane touchscreen UI
+After=deskpane-daemon.service deskpane-unbind-fbcon.service
+Wants=deskpane-daemon.service deskpane-unbind-fbcon.service
 
 [Service]
 Type=simple
-User=pi-homelab
-Group=pi-homelab
+User=deskpane
+Group=deskpane
 # video for /dev/fb1, input for the touch device
 SupplementaryGroups=video input
-Environment=SOCKET_PATH=/run/pi-homelab-dashboard/daemon.sock
+Environment=SOCKET_PATH=/run/deskpane/daemon.sock
 # the install directory is read-only for this user, so do not try to write .pyc files
 Environment=PYTHONDONTWRITEBYTECODE=1
-WorkingDirectory=/opt/pi-homelab-dashboard/current/dashboard
-ExecStart=/usr/bin/python3 /opt/pi-homelab-dashboard/current/dashboard/dashboard.py
+WorkingDirectory=/opt/deskpane/current/dashboard
+ExecStart=/usr/bin/python3 /opt/deskpane/current/dashboard/dashboard.py
 # on-failure, not always: a tap-to-exit (clean exit 0) should stay exited,
 # only a crash (nonzero exit) should auto-restart.
 Restart=on-failure

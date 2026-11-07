@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/<owner>/pi-homelab-dashboard/security/advisories/new
+    url: https://github.com/nokri-mohammed/deskpane/security/advisories/new
     about: Do not open a public issue for a security problem. Read SECURITY.md and report it privately.
   - name: Install guide and troubleshooting
-    url: https://github.com/<owner>/pi-homelab-dashboard/blob/main/docs/INSTALL.md
+    url: https://github.com/nokri-mohammed/deskpane/blob/main/docs/INSTALL.md
     about: Most install problems have an answer in the troubleshooting section.

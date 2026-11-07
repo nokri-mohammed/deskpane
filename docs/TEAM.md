@@ -1,6 +1,6 @@
 # Team
 
-Who does what on pi-homelab-dashboard. Update the diagram when an executive or plugin is added
+Who does what on deskpane (formerly pi-homelab-dashboard). Update the diagram when an executive or plugin is added
 or removed, and add a log line every time an executive works on the project.
 
 ```mermaid
@@ -69,3 +69,5 @@ flowchart TD
 | 2026-11-07 | security-specialist | Reviewed the Pi install package: caution, 4 must-fix (groups, env file mode, [all] in config.txt, unit sandboxing) plus 6 cheap fixes; rest deferred to T-006 |
 | 2026-11-07 | doc-updater | Phase 4 first pass: INSTALL.md, SECURITY.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, issue and PR templates |
 | 2026-11-07 | architect | Applied the 14 security review fixes (groups, env mode, [all] block, unit sandboxing, rollback keep, input checks, workflow token and toolchain pin) |
+| 2026-11-07 | architect | T-022: vision, views architecture, MCP task view and canvas design, roadmap, name shortlist (recommends deskpane), rename impact |
+| 2026-11-07 | architect | T-023: renamed to deskpane (binaries, command, paths, units, user, downloads, docs), all checks and fake-root flow pass |

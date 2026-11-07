@@ -1,6 +1,6 @@
-//! Reporter CLI: reads this device's stats and pushes them to the report
-//! daemon over UDP on an interval. See ../../docs/CONTRACT.md for the wire
-//! shape. `run` is the only subcommand for now; `report` (one-shot) and
+//! deskpane client CLI: reads this device's stats and pushes them to the
+//! deskpane daemon over UDP on an interval. See ../../docs/CONTRACT.md for the
+//! wire shape. `report` is the only subcommand for now; a one-shot report and
 //! `install`/`uninstall` (systemd unit / Windows Service) are planned
 //! increments on top of this same loop.
 
@@ -15,7 +15,7 @@ use services::system_stats::SystemStats;
 mod services;
 
 #[derive(Parser)]
-#[command(name = "reporter")]
+#[command(name = "deskpane")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -24,7 +24,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Read stats and push them to the daemon in a loop, forever.
-    Run {
+    Report {
         /// Daemon address, e.g. 192.168.1.50:8765
         #[arg(long)]
         daemon: String,
@@ -98,10 +98,10 @@ fn run(daemon: &str, device_id: &str, label: &str, interval_secs: u64) {
 }
 
 fn main() {
-    // e.g. reporter run --daemon 192.168.1.50:8765 --device-id pi-zero --label Pi --interval 4
+    // e.g. deskpane report --daemon 192.168.1.50:8765 --device-id pi-zero --label Pi --interval 4
     let cli = Cli::parse();
     match cli.command {
-        Command::Run {
+        Command::Report {
             daemon,
             device_id,
             label,

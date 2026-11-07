@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the Pi release bundle, pi-homelab-dashboard-pi-aarch64.tar.gz, from
+# Builds the Pi release bundle, deskpane-pi-aarch64.tar.gz, from
 # already built aarch64 binaries. Used by the release workflow, the CI trial
 # build and scripts/provision-pi.sh. Run from anywhere inside the repo.
 #
@@ -13,7 +13,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARCHIVE_NAME="pi-homelab-dashboard-pi-aarch64.tar.gz"
+ARCHIVE_NAME="deskpane-pi-aarch64.tar.gz"
 
 die() {
   echo "package-pi-bundle.sh: error: $*" >&2
@@ -51,7 +51,7 @@ fi
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || die "bad version: '$VERSION'"
 
 # the binaries must exist and be aarch64
-for bin in daemon reporter; do
+for bin in deskpane-daemon deskpane; do
   [[ -f "$BIN_DIR/$bin" ]] || die "$BIN_DIR/$bin not found, build it first (see --help)"
   if command -v file >/dev/null; then
     file -b "$BIN_DIR/$bin" | grep -q 'aarch64' || die "$BIN_DIR/$bin is not an aarch64 binary"
@@ -61,14 +61,14 @@ done
 # lay the bundle out in a temp directory
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
-TOP="pi-homelab-dashboard-$VERSION-pi-aarch64"
+TOP="deskpane-$VERSION-pi-aarch64"
 DIR="$STAGE/$TOP"
 mkdir -p "$DIR/bin" "$DIR/dashboard" "$DIR/systemd" "$DIR/config"
 
 echo "$VERSION" >"$DIR/VERSION"
 install -m 0644 "$REPO/LICENSE" "$REPO/deploy/README.txt" "$REPO/deploy/overlay.env" "$DIR/"
 install -m 0755 "$REPO/deploy/install.sh" "$REPO/deploy/uninstall.sh" "$DIR/"
-install -m 0755 "$BIN_DIR/daemon" "$BIN_DIR/reporter" "$DIR/bin/"
+install -m 0755 "$BIN_DIR/deskpane-daemon" "$BIN_DIR/deskpane" "$DIR/bin/"
 install -m 0644 "$REPO/pi/dashboard.py" "$REPO/pi/fb_display.py" "$REPO/pi/touch.py" "$DIR/dashboard/"
 install -m 0644 "$REPO"/deploy/systemd/*.service "$DIR/systemd/"
 install -m 0644 "$REPO/deploy/env.example" "$DIR/config/"

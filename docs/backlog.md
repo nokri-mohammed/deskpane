@@ -14,10 +14,12 @@
 - T-019 install.sh remembers --no-display/--no-reporter from the last install so upgrades keep them: [todo 2026-11-07]
 - T-020 touch.py finds the touchscreen by name instead of always /dev/input/event0: [todo 2026-11-07]
 - T-021 install.sh copies uninstall.sh into /opt so uninstall works without the bundle: [todo 2026-11-07]
-- T-022 Vision and name: display with views (stats, tasks via MCP/AI agent, canvas from a web portal); pick a name that fits, rename before first publish: [todo 2026-11-07, in-progress 2026-11-07 architect]
+- T-025 Re-render the architecture diagram PNGs with the deskpane name: [todo 2026-11-07]
 - T-006 Security MEDIUM items (HMAC, firewall, sudoers, separate daemon user, touchscreen-only udev rule, unbind-fbcon sandbox, precise uninstall, bundle signing): [todo 2026-11-07]
 
 ## In Progress
+
+- T-024 Screenshots and animated GIFs of the real stats view, concept mockups for task and canvas views: [todo 2026-11-07, in-progress 2026-11-07 designer]
 
 - T-007 Open-source release v0.1.0 (plans: docs/plans/2026-11-07-open-source-release.md, docs/plans/2026-11-07-release-artifacts.md): [todo 2026-11-07, in-progress 2026-11-07 chief-of-staff (phases 1+2 done), phase 1 approved 2026-11-07 security-reviewer, phase 2 reviewed + phase 3 designed 2026-11-07 architect, CEO approved phase 3 decisions 2026-11-07, phase 3 in-progress architect, phase 4 first pass done 2026-11-07, second pass waits on the project name (T-022), phase 3 done 2026-11-07]
 
@@ -25,8 +27,11 @@
 
 ## In Review
 
+
 ## Done
 
+- T-023 Rename to deskpane for v0.1.0 (binaries deskpane-daemon and deskpane, command deskpane report, paths, units, user, downloads): [todo 2026-11-07, in-progress 2026-11-07 architect, done 2026-11-07 CEO approved]
+- T-022 Vision and name: display with views (stats, tasks via MCP/AI agent, canvas from a web portal); pick a name that fits, rename before first publish: [todo 2026-11-07, in-progress 2026-11-07 architect, done 2026-11-07 CEO chose deskpane]
 - T-011 Overlay download hardening: verify before first SSH, https-only curl, re-check hash on the Pi: [todo 2026-11-07, in-progress 2026-11-07 architect, in-review 2026-11-07 security-specialist + security-reviewer, fixes architect, fixes done 2026-11-07, done 2026-11-07 CEO approved]
 - T-010 Release workflow fixes: Cargo.lock in extra-files + --locked, initial-version instead of release-as, draft release published by one final job, per-job permissions, concurrency, actions pinned to SHAs, publish = false (before first release PR merge): [todo 2026-11-07, in-progress 2026-11-07 architect, in-review 2026-11-07 security-specialist + security-reviewer, fixes architect, fixes done 2026-11-07, done 2026-11-07 CEO approved]
 - T-012 Docs pass: stale private-data notes in CLAUDE.md and plan, em dashes, test count, device_table.rs in layout, CONTRACT.md offline sentence: [todo 2026-11-07, in-progress 2026-11-07 doc-updater, in-review 2026-11-07 CEO, done 2026-11-07 CEO approved]
