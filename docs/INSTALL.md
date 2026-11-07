@@ -135,7 +135,7 @@ These steps do the same as the one line in [Quick install](#quick-install), by h
 3. Set the version you want to install:
 
    ```bash
-   VERSION=v0.1.0-beta.1 # x-release-please-version
+   VERSION=v0.1.0-beta.2 # x-release-please-version
    ```
 
    This is the newest release when this guide was written. All releases are listed on the
@@ -341,7 +341,7 @@ The manual way:
    `VERSION` the same way as on the Pi (see the beta note there):
 
    ```bash
-   VERSION=v0.1.0-beta.1 # x-release-please-version
+   VERSION=v0.1.0-beta.2 # x-release-please-version
    curl -fLO https://github.com/nokri-mohammed/deskpane/releases/download/$VERSION/deskpane-linux-x86_64.tar.gz
    curl -fLO https://github.com/nokri-mohammed/deskpane/releases/download/$VERSION/SHA256SUMS
    ```

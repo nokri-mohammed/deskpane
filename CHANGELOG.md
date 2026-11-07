@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.0-beta.2](https://github.com/nokri-mohammed/deskpane/compare/v0.1.0-beta.1...v0.1.0-beta.2) (2026-11-07)
+
+
+### Features
+
+* one-line installer get.sh ([3ac514c](https://github.com/nokri-mohammed/deskpane/commit/3ac514c9d934998804ed6d0cdc7c179d8f3b7488))
+
 ## 0.1.0-beta.1 (2026-11-07)
 
 
