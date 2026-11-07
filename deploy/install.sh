@@ -5,7 +5,8 @@
 #
 # Usage: sudo ./install.sh [options]   (see --help)
 #
-# DESTDIR (empty by default) prefixes every file path, for testing in a fake root.
+# DESKPANE_DESTDIR (empty by default) prefixes every file path, for testing in a
+# fake root. A plain DESTDIR from the caller's environment is ignored on purpose.
 set -euo pipefail
 
 PREFIX=/opt/deskpane
@@ -13,7 +14,7 @@ CONFIG_DIR=/etc/deskpane
 UNIT_DIR=/etc/systemd/system
 BOOT_DIR=/boot/firmware
 SERVICE_USER=deskpane
-DESTDIR="${DESTDIR:-}"
+DESTDIR="${DESKPANE_DESTDIR:-}"
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # markers around the lines we add to config.txt, so uninstall.sh can find them
@@ -38,6 +39,7 @@ Usage: sudo ./install.sh [options]
                        letters, digits, dot, dash, underscore, up to 64
   --label TEXT         label shown on the dashboard (first install only), up to 64
   --overlay-file FILE  use an already downloaded display overlay (hash still checked)
+  --no-summary         skip the closing summary (get.sh prints its own)
   -h, --help           show this help
 EOF
 }
@@ -59,7 +61,71 @@ backup_once() {
   fi
 }
 
+# remove the pre-rename install (pi-homelab-dashboard, homelab-*.service): its
+# daemon holds UDP 8765 and its dashboard fights ours for the screen. Only units
+# whose Description proves they are ours are touched, and only binaries named in
+# their ExecStart are deleted, never guessed paths.
+remove_old_install() {
+  local unit_file name description exec_path old_dir
+  for unit_file in "$DESTDIR$UNIT_DIR"/homelab-*.service "$DESTDIR$UNIT_DIR/unbind-fbcon.service"; do
+    if [[ ! -f "$unit_file" ]]; then
+      continue
+    fi
+    name="$(basename "$unit_file")"
+    description="$(read_key Description "$unit_file")"
+    if [[ "$description" != pi-homelab-dashboard* && "$description" != "Unbind text console from the touchscreen framebuffer" ]]; then
+      warn "leaving $name alone: it does not look like an old pi-homelab-dashboard unit"
+      continue
+    fi
+
+    say "removing old install unit $name"
+    systemctl stop "$name" 2>/dev/null || true
+    systemctl disable "$name" 2>/dev/null || true
+
+    # first word of ExecStart; delete it only if it is the old daemon or reporter binary
+    exec_path="$(read_key ExecStart "$unit_file" | awk '{print $1}')"
+    if [[ "$exec_path" == /* && ( "$(basename "$exec_path")" == daemon || "$(basename "$exec_path")" == reporter ) && -f "$DESTDIR$exec_path" ]]; then
+      say "removing old binary $exec_path"
+      rm -f "$DESTDIR$exec_path"
+      old_dir="$(dirname "$exec_path")"
+      # list each old folder once
+      if [[ " ${OLD_DIRS[*]} " != *" $old_dir "* ]]; then
+        OLD_DIRS+=("$old_dir")
+      fi
+    fi
+    rm -f "$unit_file"
+    OLD_REMOVED=1
+  done
+  if [[ "$OLD_REMOVED" -eq 1 ]]; then
+    systemctl daemon-reload
+    systemctl reset-failed 2>/dev/null || true
+  fi
+}
+
+# stop if a process other than deskpane-daemon holds UDP 8765, and name it
+check_udp_port() {
+  local holders line process
+  if ! command -v ss >/dev/null; then
+    warn "ss not found, cannot check who uses UDP 8765"
+    return 0
+  fi
+  holders="$(ss -Hulnp 'sport = :8765' 2>/dev/null || true)"
+  while IFS= read -r line; do
+    if [[ -z "$line" ]]; then
+      continue
+    fi
+    process="$(echo "$line" | sed -n 's/.*users:(("\([^"]*\)",pid=\([0-9]*\).*/\1 (pid \2)/p')"
+    if [[ "$process" == deskpane-daemon* ]]; then
+      continue
+    fi
+    die "UDP port 8765 is in use by ${process:-an unknown process}. Stop it, then run the installer again."
+  done <<<"$holders"
+}
+
 # parse flags
+SUMMARY=1
+OLD_REMOVED=0
+OLD_DIRS=()
 WITH_DISPLAY=1
 WITH_REPORTER=1
 DEVICE_ID=""
@@ -84,6 +150,7 @@ while [[ $# -gt 0 ]]; do
       OVERLAY_FILE="$2"
       shift
       ;;
+    --no-summary) SUMMARY=0 ;;
     -h | --help)
       usage
       exit 0
@@ -122,7 +189,7 @@ if [[ -n "$LABEL" && ! "$LABEL" =~ $LABEL_PATTERN ]]; then
 fi
 
 # work directory for downloads, removed on exit
-WORK_DIR="$(mktemp -d)"
+WORK_DIR="$(mktemp -d /tmp/deskpane.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 # display overlay: get it and check its hash before changing anything on the system
@@ -146,11 +213,15 @@ if [[ "$WITH_DISPLAY" -eq 1 ]]; then
   else
     say "downloading the display overlay from goodtft/LCD-show"
     command -v curl >/dev/null || die "curl is missing: sudo apt-get install curl"
-    curl -fsSL --proto '=https' --tlsv1.2 --max-time 120 "$OVERLAY_URL" -o "$OVERLAY_TMP"
+    curl -q -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 120 "$OVERLAY_URL" -o "$OVERLAY_TMP"
     overlay_hash_ok "$OVERLAY_TMP" || die "downloaded overlay hash mismatch; nothing was changed"
     OVERLAY_NEEDED=1
   fi
 fi
+
+# an old pre-rename install would hold the port and the screen: remove it first
+remove_old_install
+check_udp_port
 
 # system packages for the dashboard, skipped when already installed
 if [[ "$WITH_DISPLAY" -eq 1 ]]; then
@@ -324,7 +395,13 @@ for dir in "$RELEASES"/*/; do
   fi
 done
 
-# summary
+# summary (get.sh passes --no-summary and prints its own)
+if [[ ${#OLD_DIRS[@]} -gt 0 ]]; then
+  say "the old install's files are still in: ${OLD_DIRS[*]} (safe to delete by hand)"
+fi
+if [[ "$SUMMARY" -eq 0 ]]; then
+  exit 0
+fi
 echo
 say "deskpane $VERSION installed"
 systemctl --no-pager --lines=0 status "${UNITS[@]}" || true

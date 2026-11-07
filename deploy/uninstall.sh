@@ -6,7 +6,8 @@
 # Usage: sudo ./uninstall.sh [--purge]
 #   --purge  also remove the settings, the user, the overlay and our boot config lines
 #
-# DESTDIR (empty by default) prefixes every file path, for testing in a fake root.
+# DESKPANE_DESTDIR (empty by default) prefixes every file path, for testing in a
+# fake root. A plain DESTDIR from the caller's environment is ignored on purpose.
 set -euo pipefail
 
 PREFIX=/opt/deskpane
@@ -14,7 +15,7 @@ CONFIG_DIR=/etc/deskpane
 UNIT_DIR=/etc/systemd/system
 BOOT_DIR=/boot/firmware
 SERVICE_USER=deskpane
-DESTDIR="${DESTDIR:-}"
+DESTDIR="${DESKPANE_DESTDIR:-}"
 UNITS=(deskpane-reporter.service deskpane-dashboard.service deskpane-unbind-fbcon.service deskpane-daemon.service)
 
 # print a step or an error and stop

@@ -79,6 +79,12 @@ mode. To enable it later:
 3. Reboot, then connect via USB cable and SSH to `raspberrypi.local`
    (needs `avahi-daemon`, installed by default on Raspberry Pi OS).
 
+## If the one-line install fails half way
+
+The one-line install (`get.sh`) removes an old `pi-homelab-dashboard` install before it runs
+`install.sh`. If the install then fails (for example `apt-get` or the display overlay download),
+run the one line again; the old install is not restored.
+
 ## Not yet covered
 
 - No backup WiFi profile (e.g. a phone hotspot) is stored. If the home

@@ -29,6 +29,10 @@
           "type": "toml",
           "path": "Cargo.lock",
           "jsonpath": "$.package[?(@.name.value==='reporter')].version"
+        },
+        {
+          "type": "generic",
+          "path": "docs/INSTALL.md"
         }
       ]
     }

@@ -5,6 +5,46 @@ stats from your other computers to it.
 
 You do not need to build anything. Every file comes from the project's GitHub release page.
 
+## Quick install
+
+1. Flash **Raspberry Pi OS Lite (64-bit)** to the SD card, with WiFi and SSH set up, and fit
+   the screen. [Prepare the SD card](#prepare-the-sd-card) shows how.
+2. Log in to the Pi and run this one line:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/nokri-mohammed/deskpane/main/get.sh | sudo bash
+   ```
+
+3. Done. On the first install the Pi restarts once, 10 seconds after the script finishes
+   (Ctrl+C cancels, `--no-reboot` skips). Upgrades do not restart it. After the restart the
+   dashboard comes up on the screen.
+
+This runs a script from the project's `main` branch as root. It downloads the release, checks it
+against the release's `SHA256SUMS` and stops on any mismatch. That check catches a broken or
+changed download. It does not prove who made the release; signed releases are planned. If you
+would rather look first: `curl -fsSL https://raw.githubusercontent.com/nokri-mohammed/deskpane/main/get.sh -o get.sh`, read it, then `sudo bash get.sh`. The
+manual install below does the same steps by hand.
+
+The script finds the newest release (test versions included). It removes an old
+`pi-homelab-dashboard` install if it finds one, runs the bundle's `install.sh`, and prints the
+line to run on your other computers. To change what it does, add options after `bash -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nokri-mohammed/deskpane/main/get.sh | sudo bash -s -- --no-reboot --label "Pi Zero"
+```
+
+| Option | What it does |
+|---|---|
+| `--version vX.Y.Z` | Install this version instead of the newest one. |
+| `--no-reboot` | Do not restart the Pi at the end. Restart it yourself before you use the screen. |
+| `--no-display`, `--no-reporter`, `--device-id ID`, `--label TEXT` | Passed to the installer. See [Installer options](#installer-options). |
+| `--reporter-only` | Install only the `deskpane` program, on another Linux computer. See [Linux](#linux). |
+| `--daemon ADDRESS` | With `--reporter-only`: report to the Pi at this address at every start. |
+
+To upgrade later, run the same line again. Your settings stay the same.
+
+The rest of this guide is the manual way, step by step.
+
 In this guide:
 
 - `192.168.1.50` is the Pi's IP address. Use your own.
@@ -15,7 +55,7 @@ In this guide:
 
 1. [What you need](#what-you-need)
 2. [Prepare the SD card](#prepare-the-sd-card)
-3. [Install the dashboard on the Pi](#install-the-dashboard-on-the-pi)
+3. [Manual install](#manual-install)
 4. [Check that it works](#check-that-it-works)
 5. [Send stats from your other computers](#send-stats-from-your-other-computers)
 6. [Change the settings](#change-the-settings)
@@ -28,12 +68,13 @@ In this guide:
 
 Hardware:
 
-- A Raspberry Pi Zero 2 W. Another Pi that runs 64-bit Raspberry Pi OS (Pi 3, 4 or 5) can
+- A [Raspberry Pi Zero 2 W](https://www.raspberrypi.com/products/raspberry-pi-zero-2-w/). Another Pi that runs 64-bit Raspberry Pi OS (Pi 3, 4 or 5) can
   also work, but the project is tested on the Pi Zero 2 W only.
 - An Elegoo 3.5" SPI touchscreen. This is a clone of the common "LCD35" design (ILI9486
-  display chip, XPT2046 touch chip). See [HARDWARE.md](HARDWARE.md) for the pins.
+  display chip, XPT2046 touch chip). The [Elegoo manual](https://www.elegoo.com/en-gb/blogs/arduino-projects/elegoo-3-5-inch-touch-screen-for-raspberry-pi-manual) has the
+  vendor's own setup notes. See [HARDWARE.md](HARDWARE.md) for the pins.
 - A microSD card.
-- A power supply for your Pi.
+- A [power supply](https://thepihut.com/collections/raspberry-pi-power-supplies) for your Pi (5 V micro USB for the Pi Zero 2 W).
 - A pin header on the Pi. Some Pi Zero 2 W boards come without one.
 
 Software and network:
@@ -73,7 +114,9 @@ project. Then it checks the file's SHA-256 hash before it uses it.
 everything the screen needs. Do not run the `LCD35-show` script from the vendor. It is made for
 older systems and changes many settings ([HARDWARE.md](HARDWARE.md) explains why).
 
-## Install the dashboard on the Pi
+## Manual install
+
+These steps do the same as the one line in [Quick install](#quick-install), by hand.
 
 1. Log in to the Pi from your computer:
 
@@ -89,16 +132,25 @@ older systems and changes many settings ([HARDWARE.md](HARDWARE.md) explains why
    mkdir ~/deskpane && cd ~/deskpane
    ```
 
-3. Download the Pi bundle:
+3. Set the version you want to install:
 
    ```bash
-   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/latest/download/deskpane-pi-aarch64.tar.gz
+   VERSION=v0.1.0-beta.1 # x-release-please-version
    ```
 
-4. Download the checksum file:
+   This is the newest release when this guide was written. All releases are listed on the
+   [releases page](https://github.com/nokri-mohammed/deskpane/releases).
+
+   > **Beta versions.** A version like `v0.1.0-beta.1` is a test version: it is marked
+   > "Pre-release" on GitHub. Links that use `releases/latest` skip pre-releases, so they
+   > return `404` until a stable version is out. The commands in this guide put the version
+   > in the link instead, so they work for betas and stable versions alike.
+
+4. Download the Pi bundle and the checksum file:
 
    ```bash
-   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/latest/download/SHA256SUMS
+   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/download/$VERSION/deskpane-pi-aarch64.tar.gz
+   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/download/$VERSION/SHA256SUMS
    ```
 
 5. Check the download:
@@ -117,7 +169,7 @@ older systems and changes many settings ([HARDWARE.md](HARDWARE.md) explains why
    ```
 
 7. Go into the new folder. Its name contains the version, for example
-   `deskpane-0.1.0-pi-aarch64`:
+   `deskpane-0.1.0-beta.1-pi-aarch64`:
 
    ```bash
    cd deskpane-*-pi-aarch64
@@ -156,6 +208,7 @@ These are all the options `install.sh` accepts. Run `./install.sh --help` to see
 | `--device-id ID` | The id of the Pi's own entry. Use 1 to 64 letters, digits, dots, dashes or underscores. First install only. |
 | `--label TEXT` | The name shown for the Pi on the dashboard. Use up to 64 letters, digits, spaces and `. _ ( ) -`. First install only. |
 | `--overlay-file FILE` | Use a display driver file that you already downloaded. The installer still checks its hash. |
+| `--no-summary` | Do not print the summary at the end. The one-line install uses this and prints its own. |
 | `-h`, `--help` | Show the help. |
 
 If you do not give `--device-id` or `--label`, the Pi shows up as `pi-zero` with the label
@@ -167,24 +220,27 @@ You do not need to do any of this by hand. The list is here so you know what cha
 
 1. It checks that it runs as root, on 64-bit Raspberry Pi OS, with `/boot/firmware/config.txt`
    present.
-2. It downloads the display driver file and checks its hash. If the hash is wrong, it stops
+2. It removes an old install from before the rename (`homelab-*.service` units from
+   `pi-homelab-dashboard`): it stops and deletes those units, and deletes the old program files
+   named in them. It stops with the process name if another program still uses UDP port 8765.
+3. It downloads the display driver file and checks its hash. If the hash is wrong, it stops
    before it changes anything.
-3. It installs `python3-pygame` and `python3-evdev` with `apt-get`.
-4. It creates a system user `deskpane`. This user cannot log in. The services run as this
+4. It installs `python3-pygame` and `python3-evdev` with `apt-get`.
+5. It creates a system user `deskpane`. This user cannot log in. The services run as this
    user.
-5. It copies the program to `/opt/deskpane/releases/<version>/`. The link
+6. It copies the program to `/opt/deskpane/releases/<version>/`. The link
    `/opt/deskpane/current` points to the active version.
-6. On the first install only, it writes the settings file `/etc/deskpane/env`.
-7. It copies the display driver file to `/boot/firmware/overlays/tft35a.dtbo`.
-8. It adds a `dtoverlay=tft35a:rotate=0` block to `/boot/firmware/config.txt`.
-9. It adds `fbcon=map:1` to `/boot/firmware/cmdline.txt`. This keeps the text console off the
+7. On the first install only, it writes the settings file `/etc/deskpane/env`.
+8. It copies the display driver file to `/boot/firmware/overlays/tft35a.dtbo`.
+9. It adds a `dtoverlay=tft35a:rotate=0` block to `/boot/firmware/config.txt`.
+10. It adds `fbcon=map:1` to `/boot/firmware/cmdline.txt`. This keeps the text console off the
    touchscreen.
-10. Before its first change to a boot file, it saves a copy as `<file>.deskpane.bak`.
-11. It installs, turns on and starts the systemd services.
-12. It keeps the current and the previous version in `/opt/deskpane/releases/`, and
+11. Before its first change to a boot file, it saves a copy as `<file>.deskpane.bak`.
+12. It installs, turns on and starts the systemd services.
+13. It keeps the current and the previous version in `/opt/deskpane/releases/`, and
     deletes older ones.
 
-With `--no-display`, the installer skips steps 2, 3, 7, 8 and 9.
+With `--no-display`, the installer skips steps 3, 4, 8, 9 and 10.
 
 ## Check that it works
 
@@ -253,6 +309,19 @@ short.
 
 The Linux reporter is one file with no dependencies. It runs on any 64-bit Linux system.
 
+The quick way is one line. It installs `deskpane` to `/usr/local/bin` and adds a systemd
+service that reports to the Pi at every start (use your Pi's IP address):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nokri-mohammed/deskpane/main/get.sh | sudo bash -s -- --reporter-only --daemon 192.168.1.50:8765
+```
+
+The device id is the computer's short hostname, and the label is the same. Add
+`--device-id my-pc --label "My PC"` to choose your own. The settings are in
+`/etc/deskpane/reporter.env`. Without `--daemon`, the line only installs the program.
+
+The manual way:
+
 1. Find your processor type:
 
    ```bash
@@ -268,11 +337,13 @@ The Linux reporter is one file with no dependencies. It runs on any 64-bit Linux
    mkdir ~/deskpane && cd ~/deskpane
    ```
 
-3. Download the reporter and the checksum file. This example is for `x86_64`:
+3. Download the reporter and the checksum file. This example is for `x86_64`. Set
+   `VERSION` the same way as on the Pi (see the beta note there):
 
    ```bash
-   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/latest/download/deskpane-linux-x86_64.tar.gz
-   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/latest/download/SHA256SUMS
+   VERSION=v0.1.0-beta.1 # x-release-please-version
+   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/download/$VERSION/deskpane-linux-x86_64.tar.gz
+   curl -fLO https://github.com/nokri-mohammed/deskpane/releases/download/$VERSION/SHA256SUMS
    ```
 
 4. Check the download. You must see `OK`:
@@ -306,7 +377,7 @@ The Linux reporter is one file with no dependencies. It runs on any 64-bit Linux
 
 #### Start the reporter when the computer starts (optional)
 
-The reporter cannot install itself as a service yet. You can add a systemd service by hand.
+The one-line install with `--daemon` (above) sets this up for you. To add a systemd service by hand instead:
 
 1. Create the file `/etc/systemd/system/deskpane-reporter.service` with this text. Change the
    address, id and label:
@@ -349,8 +420,9 @@ The reporter cannot install itself as a service yet. You can add a systemd servi
 
 ### Windows
 
-1. Download `deskpane-windows-x86_64.zip` and `SHA256SUMS` from
-   `https://github.com/nokri-mohammed/deskpane/releases/latest`.
+1. Download `deskpane-windows-x86_64.zip` and `SHA256SUMS` from the
+   [releases page](https://github.com/nokri-mohammed/deskpane/releases). Pick the newest release, including one marked "Pre-release"
+   if there is no stable version yet.
 2. Open PowerShell in your Downloads folder.
 3. Show the hash of the zip file:
 
@@ -429,7 +501,7 @@ To upgrade, run the `install.sh` of a newer bundle. Your settings stay the same.
    ```
 
 2. Download, check and extract the new bundle. Use steps 3 to 7 of
-   [Install the dashboard on the Pi](#install-the-dashboard-on-the-pi).
+   [Manual install](#manual-install).
 3. Run the installer with the same options that you used the first time:
 
    ```bash

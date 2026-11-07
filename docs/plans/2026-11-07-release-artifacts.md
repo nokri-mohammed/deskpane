@@ -395,3 +395,79 @@ every `0.x` release as pre-release when it is `true`, and its next bump would be
 `0.1.1-beta` (no number). `versioning` and `prerelease-type` can stay; with `prerelease: false`
 they bump like the default strategy. To start a new beta series later, set `prerelease` back to
 `true` and land a commit with a `Release-As: 0.2.0-beta.1` footer.
+
+### One-line install: get.sh (T-028, 2026-11-07)
+
+Goal: on a fresh Pi with Raspberry Pi OS Lite (64-bit) the whole install is
+`curl -fsSL https://raw.githubusercontent.com/nokri-mohammed/deskpane/main/get.sh | sudo bash`.
+
+Why: the first real-Pi test showed two problems the manual path does not catch. The old
+pre-rename install (`homelab-daemon/dashboard/reporter.service`, binary `daemon`) still held
+UDP 8765, so `deskpane-daemon` crash-looped on "Address in use" and two dashboards fought over
+the screen. And `releases/latest/download/...` returns 404 while only a pre-release exists.
+
+Design:
+
+- `get.sh` sits at the repo root and is served from `main` by raw.githubusercontent.com. The
+  whole script is one `main` function called on the last line, so a download cut short runs
+  nothing. No prompts: it works piped with no TTY. Options pass with `| sudo bash -s -- ...`.
+- Release lookup: `GET https://api.github.com/repos/nokri-mohammed/deskpane/releases?per_page=10`
+  without auth. The API lists newest first and hides drafts from anonymous callers, so the first
+  `tag_name` is the newest release, pre-releases included. HTTP 000 means no network, 403/429
+  means rate limit (60 an hour per IP); both stop with a one-line message, and `--version vX.Y.Z`
+  skips the lookup. The tag must match `^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`.
+- Downloads go to a `mktemp -d` folder removed by an EXIT trap, with `--proto =https --tlsv1.2`.
+  The asset is checked against the exact `SHA256SUMS` line for its name; a missing line or a
+  mismatch stops before anything is extracted. Tar runs with `--no-same-owner`, since the client
+  archives carry the CI runner's uid.
+- Pi mode checks: root, Linux, `uname -m` is aarch64, `/proc/device-tree/model` starts with
+  "Raspberry Pi", `/etc/os-release` `VERSION_ID` is 12 (Bookworm) or later.
+- Old install: only `homelab-*.service` and `unbind-fbcon.service` files whose `Description`
+  proves they came from pi-homelab-dashboard are stopped, disabled and deleted, then
+  `daemon-reload` and `reset-failed`. A binary is deleted only if it is the first word of that
+  unit's `ExecStart` and its name is `daemon` or `reporter`; nothing is guessed, other files in
+  that folder stay. Then `ss -Hulnp 'sport = :8765'`: any holder other than `deskpane-daemon`
+  stops the install, naming the process and pid. The same two functions live in
+  `deploy/install.sh`, so the manual path is safe too; get.sh keeps its own copy because the
+  0.1.0-beta.1 bundle's install.sh has neither.
+- Then it runs the bundle's `install.sh` with the passed options (and `--no-summary` when the
+  bundle supports it), prints which units run, the Pi's IP and the reporter lines for other
+  machines. If this run added the overlay or `fbcon=map:1`, it prints "Rebooting in 10 s,
+  Ctrl+C to cancel" and reboots; `--no-reboot` skips that.
+- Client mode, `--reporter-only`: any 64-bit Linux (x86_64 or aarch64), downloads
+  `deskpane-linux-<arch>.tar.gz`, installs `/usr/local/bin/deskpane`. With
+  `--daemon host:port` it writes `/etc/deskpane/reporter.env` (0600 root) and a
+  `deskpane-reporter.service` with `DynamicUser=yes` and a sandbox, enabled at boot. The device
+  id defaults to the short hostname. One script instead of a second `get-reporter.sh`: one URL to
+  document and one place for the download and hash code. Windows stays the zip.
+- CI: shellcheck covers `get.sh` in `ci.yml`.
+
+Trust model, stated plainly: piping a script into `sudo bash` trusts GitHub and the `main`
+branch. The hash check protects the release download against corruption and a changed asset,
+not against a changed `get.sh`; signing (T-006) is the step that closes that. Users can read the
+script at the URL first, and the manual install stays documented.
+
+Security review follow-ups (security-specialist, CAUTION, six fixes applied):
+
+1. Env hygiene for `sudo -E` and root shells: the fake-root hook is `DESKPANE_DESTDIR` in
+   get.sh, install.sh and uninstall.sh (a stray `DESTDIR` is ignored), every curl starts with
+   `-q` (no `~/.curlrc`) and has `--proto-redir` set like `--proto`, the work folder is
+   `mktemp -d /tmp/deskpane.XXXXXX` (no `TMPDIR`), and any set test hook prints
+   `WARNING: test hooks set: ...`.
+2. `--reporter-only` refuses on the Pi itself (`/etc/deskpane/env` or
+   `deskpane-daemon.service` present), so it never replaces the bundle's reporter unit.
+3. The API call follows redirects (`-L`), keeps curl's error line, and HTTP 000 says "no
+   network, or the clock is wrong, or TLS failed".
+4. The client unit gets the full systemd sandbox (kernel, clock, hostname, namespaces,
+   W^X, `@system-service` filter, native syscalls, `UMask=0077`) and only `AF_INET AF_INET6`.
+   It must still be confirmed on a real machine.
+5. INSTALL.md says plainly what the hash check does and does not prove, and how to read the
+   script first.
+6. get.sh's cleanup prints where the old files still are, like install.sh.
+
+Tested locally (fake root under `unshare -r`, shims for systemctl, apt-get and useradd):
+piped with no TTY, old install plus a foreign process on UDP 8765, hash mismatch, missing
+`SHA256SUMS` line, no network (empty network namespace), unknown and malformed versions,
+non-Pi, x86_64, Bullseye, non-root, upgrade without reboot, client with and without
+`--daemon`, and the real GitHub API lookup and download of v0.1.0-beta.1. Not tested on a real
+Pi yet.
