@@ -190,14 +190,20 @@ mod tests {
 
     #[test]
     fn root_disk_is_preferred_even_when_not_first() {
-        let disks = vec![disk("/boot", 1_000_000_000, 0), disk("/", 10_000_000_000, 4_000_000_000)];
+        let disks = vec![
+            disk("/boot", 1_000_000_000, 0),
+            disk("/", 10_000_000_000, 4_000_000_000),
+        ];
 
         assert_eq!(pick_disk_gb(&disks), (6.0, 10.0));
     }
 
     #[test]
     fn first_disk_is_used_when_there_is_no_root() {
-        let disks = vec![disk("C:\\", 2_000_000_000, 500_000_000), disk("D:\\", 9_000_000_000, 0)];
+        let disks = vec![
+            disk("C:\\", 2_000_000_000, 500_000_000),
+            disk("D:\\", 9_000_000_000, 0),
+        ];
 
         assert_eq!(pick_disk_gb(&disks), (1.5, 2.0));
     }

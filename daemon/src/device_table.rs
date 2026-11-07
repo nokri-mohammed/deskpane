@@ -20,7 +20,12 @@ pub type DeviceTable = HashMap<String, (Report, Instant)>;
  * returns: true if stored; false if the device is new and the table is full.
  *          A device already in the table is always updated.
  */
-pub fn insert_report(table: &mut DeviceTable, report: Report, now: Instant, max_devices: usize) -> bool {
+pub fn insert_report(
+    table: &mut DeviceTable,
+    report: Report,
+    now: Instant,
+    max_devices: usize,
+) -> bool {
     let is_known = table.contains_key(&report.device_id);
     if !is_known && table.len() >= max_devices {
         return false;
@@ -149,7 +154,12 @@ mod tests {
         let three = 3;
         insert_report(&mut table, report("old-1", 1.0), start, three);
         insert_report(&mut table, report("old-2", 1.0), start, three);
-        insert_report(&mut table, report("fresh", 1.0), start + Duration::from_secs(200), three);
+        insert_report(
+            &mut table,
+            report("fresh", 1.0),
+            start + Duration::from_secs(200),
+            three,
+        );
 
         let now = start + Duration::from_secs(301);
         let mut forgotten = forget_silent(&mut table, now, FORGET);
@@ -175,7 +185,12 @@ mod tests {
         let mut table: DeviceTable = HashMap::new();
         let start = Instant::now();
         insert_report(&mut table, report("old", 1.0), start, CAP);
-        insert_report(&mut table, report("fresh", 1.0), start + Duration::from_secs(200), CAP);
+        insert_report(
+            &mut table,
+            report("fresh", 1.0),
+            start + Duration::from_secs(200),
+            CAP,
+        );
 
         // "old" has been silent 301 s, "fresh" only 101 s
         let now = start + Duration::from_secs(301);
@@ -203,7 +218,12 @@ mod tests {
         let mut table: DeviceTable = HashMap::new();
         let start = Instant::now();
         insert_report(&mut table, report("a", 1.0), start, CAP);
-        insert_report(&mut table, report("b", 1.0), start + Duration::from_secs(100), CAP);
+        insert_report(
+            &mut table,
+            report("b", 1.0),
+            start + Duration::from_secs(100),
+            CAP,
+        );
 
         // full: a new device is turned away
         let now = start + Duration::from_secs(301);

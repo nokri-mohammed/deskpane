@@ -132,7 +132,9 @@ fn check_text(name: &str, value: &str, max_bytes: usize, allow_empty: bool) -> R
 
     let length = value.len();
     if length > max_bytes {
-        return Err(format!("{name}: {length} bytes, longer than the limit of {max_bytes}"));
+        return Err(format!(
+            "{name}: {length} bytes, longer than the limit of {max_bytes}"
+        ));
     }
 
     // control characters (NUL, newline, escape, DEL, ...) break drawing and logs
@@ -171,7 +173,12 @@ fn check_range(name: &str, value: f64, min: f64, max: f64) -> Result<(), String>
  * used_name, used: the "used" field name and value
  * total_name, total: the "total" field name and value
  */
-fn check_used_total(used_name: &str, used: f64, total_name: &str, total: f64) -> Result<(), String> {
+fn check_used_total(
+    used_name: &str,
+    used: f64,
+    total_name: &str,
+    total: f64,
+) -> Result<(), String> {
     let used_checked = check_range(used_name, used, 0.0, f64::MAX);
     match used_checked {
         Ok(()) => {}
@@ -187,7 +194,9 @@ fn check_used_total(used_name: &str, used: f64, total_name: &str, total: f64) ->
     // allow a small tolerance for rounding on the device
     let limit = total * USED_OVER_TOTAL_TOLERANCE;
     if used > limit {
-        return Err(format!("{used_name}: {used} is more than {total_name} {total}"));
+        return Err(format!(
+            "{used_name}: {used} is more than {total_name} {total}"
+        ));
     }
 
     Ok(())
@@ -222,7 +231,10 @@ mod tests {
             Err(reason) => {
                 let prefix = format!("{field}:");
                 let names_field = reason.starts_with(&prefix);
-                assert!(names_field, "reason '{reason}' should start with '{prefix}'");
+                assert!(
+                    names_field,
+                    "reason '{reason}' should start with '{prefix}'"
+                );
             }
         }
     }

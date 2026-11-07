@@ -196,7 +196,6 @@ async fn main() {
             tokio::join!(
                 // listen for incoming reports from devices.
                 udp_server(udp_socket_server, state.clone()),
-
                 /*
                  * every second, forget long-silent devices, then build a
                  * status summary and broadcast it. Forgetting here (not on
@@ -212,7 +211,6 @@ async fn main() {
                         broadcast_statuses(&state, &broadcaster).await;
                     }
                 },
-
                 // accepts dashboard connections and streams that summary to them.
                 unix_socket_relay(&unix_socket_server, &broadcaster),
             );

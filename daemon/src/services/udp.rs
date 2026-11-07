@@ -107,7 +107,9 @@ mod tests {
     // a plain blocking socket on a free port, standing in for the receiving end
     fn blocking_receiver() -> (BlockingUdpSocket, String) {
         let socket = BlockingUdpSocket::bind("127.0.0.1:0").unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let addr = socket.local_addr().unwrap().to_string();
         (socket, addr)
     }
