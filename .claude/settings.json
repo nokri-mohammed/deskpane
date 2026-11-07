@@ -1,0 +1,9 @@
+{
+  "enabledPlugins": {
+    "review@claude-team": true,
+    "tdd@claude-team": true,
+    "architecture@claude-team": true,
+    "patterns@claude-team": true,
+    "essentials@claude-team": true
+  }
+}
