@@ -1,24 +1,17 @@
-//! Report daemon: accepts one JSON report per datagram from any reporting
-//! device (see ../../docs/CONTRACT.md), keeps the latest report per device
-//! in memory, and relays the live set (with an `online` flag) to any local
-//! subscriber over a Unix domain socket.
-//!
-//! v1 transport is plain UDP with no authentication — fine on a trusted
-//! LAN, not fine beyond it. PROTOCOL below is the single switch point for
-//! adding TCP and TCP+TLS later without restructuring the rest of the
-//! daemon: each transport just needs to land a `Report` into `state`.
-
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use daemon::contract::{DeviceStatus, Report};
-use tokio::io::AsyncWriteExt;
-use tokio::net::{UdpSocket, UnixListener};
-use tokio::sync::{broadcast, RwLock};
+use daemon::services::broadcaster::Broadcaster;
+use daemon::services::udp::UdpSocketServer;
+use daemon::services::unix_socket::UnixSocketServer;
+use tokio::sync::RwLock;
 
 const OFFLINE_AFTER: Duration = Duration::from_secs(15);
+const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8765";
+const DEFAULT_SOCKET_PATH: &str = "/tmp/pi-homelab-dashboard.sock";
 
 type SharedState = Arc<RwLock<HashMap<String, (Report, Instant)>>>;
 
@@ -32,7 +25,12 @@ enum Protocol {
 
 impl Protocol {
     fn from_env() -> Self {
-        match env::var("PROTOCOL").unwrap_or_else(|_| "udp".into()).as_str() {
+        let read = env::var("PROTOCOL");
+        let value = match read {
+            Ok(v) => v,
+            Err(_) => "udp".to_string(),
+        };
+        match value.as_str() {
             "udp" => Protocol::Udp,
             other => panic!(
                 "unsupported PROTOCOL '{other}' — only 'udp' is implemented so far (tcp/tcp+tls planned)"
@@ -41,69 +39,91 @@ impl Protocol {
     }
 }
 
-async fn udp_server(addr: &str, state: SharedState) {
-    let socket = UdpSocket::bind(addr)
-        .await
-        .unwrap_or_else(|e| panic!("bind udp {addr}: {e}"));
-    println!("daemon: UDP listening on {addr} (no auth — trusted LAN only for now)");
-
-    let mut buf = vec![0u8; 8192];
+// receive device reports over UDP and store the latest one per device
+async fn udp_server(mut udp_socket_server: UdpSocketServer, state: SharedState) {
     loop {
-        match socket.recv_from(&mut buf).await {
-            Ok((len, peer)) => match serde_json::from_slice::<Report>(&buf[..len]) {
-                Ok(report) => {
-                    let device_id = report.device_id.clone();
-                    state.write().await.insert(device_id, (report, Instant::now()));
-                }
-                Err(e) => eprintln!("daemon: bad report from {peer}: {e}"),
-            },
-            Err(e) => eprintln!("daemon: recv error: {e}"),
-        }
-    }
-}
+        // wait for the next packet from a device
+        let received = udp_socket_server.receive().await;
+        let (bytes, peer) = match received {
+            Some(x) => x,
+            None => continue,
+        };
 
-/// Every second, snapshot the current state (with online/offline computed)
-/// and broadcast it as one JSON array line to every socket subscriber.
-async fn tick_loop(state: SharedState, tx: broadcast::Sender<String>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
-    loop {
-        interval.tick().await;
-        let snapshot = state.read().await;
-        let now = Instant::now();
-        let statuses: Vec<DeviceStatus> = snapshot
-            .values()
-            .map(|(report, last_seen)| DeviceStatus {
-                report: report.clone(),
-                online: now.duration_since(*last_seen) < OFFLINE_AFTER,
-            })
-            .collect();
-        drop(snapshot);
-        if let Ok(line) = serde_json::to_string(&statuses) {
-            let _ = tx.send(line); // no subscribers yet is fine
-        }
-    }
-}
-
-async fn unix_socket_server(socket_path: &str, tx: broadcast::Sender<String>) {
-    let _ = std::fs::remove_file(socket_path); // stale socket from a previous run
-    let listener = UnixListener::bind(socket_path)
-        .unwrap_or_else(|e| panic!("bind unix socket {socket_path}: {e}"));
-    println!("daemon: dashboard socket at {socket_path}");
-    loop {
-        let (mut stream, _) = match listener.accept().await {
-            Ok(x) => x,
+        // Parses the bytes as JSON and validates they match Report's exact
+        // fields/types in one step.
+        let parsed = serde_json::from_slice::<Report>(bytes);
+        let report = match parsed {
+            Ok(r) => r,
             Err(e) => {
-                eprintln!("daemon: unix accept error: {e}");
+                eprintln!("daemon: bad report from {peer}: {e}");
                 continue;
             }
         };
-        let mut rx = tx.subscribe();
+
+        let device_id = report.device_id.clone();
+        state.write().await.insert(device_id, (report, Instant::now()));
+    }
+}
+
+/// Snapshot the current state (with online/offline computed) and broadcast
+/// it once, as one JSON array line, to every socket subscriber.
+async fn broadcast_statuses(state: &SharedState, broadcaster: &Broadcaster) {
+    // read-lock the table to look at every device's latest report
+    let snapshot = state.read().await;
+    // get current timestamp
+    let now = Instant::now();
+    // build each device's status (online if seen recently) into one list
+    let mut statuses: Vec<DeviceStatus> = Vec::new();
+    for (report, last_seen) in snapshot.values() {
+        let silent_for = now.duration_since(*last_seen);
+
+        let online;
+        if silent_for < OFFLINE_AFTER {
+            online = true;
+        } else {
+            online = false;
+        }
+
+        let status = DeviceStatus {
+            report: report.clone(),
+            online: online,
+        };
+        statuses.push(status);
+    }
+    // release the read lock early, before the JSON/broadcast work below
+    drop(snapshot);
+
+    broadcaster.send_json(&statuses);
+}
+
+/// Accepts dashboard connections and, for each one, relays every message
+/// from `broadcaster` to it until the write fails or the connection drops.
+async fn unix_socket_relay(socket_server: &UnixSocketServer, broadcaster: &Broadcaster) {
+    loop {
+        // wait for a client to connect
+        let accepted = socket_server.subscribe().await;
+        let mut subscriber = match accepted {
+            Some(s) => s,
+            None => continue,
+        };
+        let mut rx = broadcaster.subscribe();
         tokio::spawn(async move {
-            while let Ok(line) = rx.recv().await {
-                if stream.write_all(line.as_bytes()).await.is_err() {
+            loop {
+                // wait for the next broadcast message
+                let received = rx.recv().await;
+                let line = match received {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+
+                // push it out to this client
+                let wrote_line = subscriber.broadcast(line.as_bytes()).await;
+                if !wrote_line {
                     break;
                 }
-                if stream.write_all(b"\n").await.is_err() {
+
+                let wrote_newline = subscriber.broadcast(b"\n").await;
+                if !wrote_newline {
                     break;
                 }
             }
@@ -113,20 +133,44 @@ async fn unix_socket_server(socket_path: &str, tx: broadcast::Sender<String>) {
 
 #[tokio::main]
 async fn main() {
-    let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8765".into());
-    let socket_path =
-        env::var("SOCKET_PATH").unwrap_or_else(|_| "/tmp/pi-homelab-dashboard.sock".into());
+    let listen_addr_read = env::var("LISTEN_ADDR");
+    let listen_addr = match listen_addr_read {
+        Ok(v) => v,
+        Err(_) => DEFAULT_LISTEN_ADDR.to_string(),
+    };
+
+    let socket_path_read = env::var("SOCKET_PATH");
+    let socket_path = match socket_path_read {
+        Ok(v) => v,
+        Err(_) => DEFAULT_SOCKET_PATH.to_string(),
+    };
+
     let protocol = Protocol::from_env();
 
     let state: SharedState = Arc::new(RwLock::new(HashMap::new()));
-    let (tx, _rx) = broadcast::channel::<String>(16);
+    let broadcaster = Broadcaster::new(16);
+    let unix_socket_server = UnixSocketServer::new(&socket_path);
 
     match protocol {
         Protocol::Udp => {
+            let udp_socket_server = UdpSocketServer::new(&listen_addr).await;
+
             tokio::join!(
-                udp_server(&listen_addr, state.clone()),
-                tick_loop(state.clone(), tx.clone()),
-                unix_socket_server(&socket_path, tx.clone()),
+                // listen for incoming reports from devices.
+                udp_server(udp_socket_server, state.clone()),
+
+                // every second, build a status summary and broadcast it.
+                async {
+                    let mut interval = tokio::time::interval(Duration::from_secs(1));
+                    loop {
+                        // wait for the next 1-second tick
+                        interval.tick().await;
+                        broadcast_statuses(&state, &broadcaster).await;
+                    }
+                },
+
+                // accepts dashboard connections and streams that summary to them.
+                unix_socket_relay(&unix_socket_server, &broadcaster),
             );
         }
     }

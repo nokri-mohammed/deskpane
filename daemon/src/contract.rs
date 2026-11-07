@@ -18,8 +18,7 @@ pub struct Report {
     pub uptime_s: f64,
 }
 
-/// What the daemon pushes to the dashboard over the Unix socket: a report
-/// plus the daemon's own judgment of whether the device is still live.
+/// What the daemon pushes to the dashboard over the Unix socket
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceStatus {
     #[serde(flatten)]

@@ -56,12 +56,13 @@ picture.
 
 ```
 pi/           Dashboard (Python/pygame) — runs on the Pi, owns the display
-daemon/       Report daemon (Rust) — runs on the Pi, owns the network and
-              the contract module (daemon/src/contract.rs: the Report/
-              DeviceStatus types), since the daemon is the interface
-              reporters report into
+daemon/       Report daemon (Rust) — runs on the Pi, owns the network, the
+              contract module (daemon/src/contract.rs: the Report/
+              DeviceStatus types) and the shared services/ (UDP server +
+              client, broadcaster, Unix socket server)
 reporter/     Stats reporter (Rust) — runs on every reporting device,
-              depends on daemon as a library for the contract types
+              depends on daemon as a library for the contract types and
+              the UDP client
 docs/         CONTRACT.md (the JSON shape devices report in), HARDWARE.md,
               RECOVERY.md, and diagram/ (architecture diagram source +
               rendered PNGs)
@@ -69,9 +70,9 @@ scripts/      provision-pi.sh — pushes this repo onto a freshly-flashed Pi
 ```
 
 `daemon/` and `reporter/` are one Cargo workspace — one `Cargo.toml` at the
-repo root, one `Cargo.lock`. `reporter` depends on `daemon` only for its
-`contract` module (the shared `Report`/`DeviceStatus` types); it doesn't
-run any of the daemon's networking code.
+repo root, one `Cargo.lock`. `reporter` depends on `daemon` as a library
+for the shared `Report`/`DeviceStatus` types and the `UdpClient` in
+`daemon::services::udp`; it doesn't run any of the daemon's own server code.
 
 The private CA lives in a separate sibling repo,
 [`pi-homelab-ca`](../pi-homelab-ca) — kept out of this repo entirely so it
