@@ -44,6 +44,10 @@ the dashboard running on a Pi with a reporter on their PC, by following the docs
 
 Owner: architect reviews the design, chief of staff implements.
 
+After v0.1.0 ships, remove `"release-as": "0.1.0"` from `release-please-config.json`, or
+every release PR will keep proposing 0.1.0. GitHub repo setting needed: Actions may create pull
+requests (Settings, Actions, General).
+
 ## Phase 3: release artifacts people actually need
 
 | Artifact | For |

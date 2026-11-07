@@ -83,6 +83,10 @@ All Rust here follows the `rust-patterns` skill from the claude-team hub
   hostnames or LAN IPs into tracked files. Use placeholders (`192.168.1.50`, `pi-zero`).
 - The private CA lives in the sibling repo `../pi-homelab-ca`. Never copy keys or certs here.
 - Commit only when the owner asks. Branch first if on `main`.
+- Commit messages follow Conventional Commits (`feat:`, `fix:`, `docs:`, `feat!:` for
+  breaking). release-please derives the next semantic version and CHANGELOG.md from them, so a
+  wrong type means a wrong release. One version covers the whole project (`[workspace.package]`
+  in `Cargo.toml`); never edit it by hand.
 - Never use em dashes in docs or comments.
 
 ## Team

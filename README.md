@@ -111,19 +111,28 @@ Not built yet:
 - Running any of this on the actual Pi / real touchscreen — everything so
   far has been proven on dev hardware only.
 
-## Releases
+## Versioning and releases
 
-Pushing a tag like `v0.2.0` triggers [`.github/workflows/release.yml`](.github/workflows/release.yml),
-which cross-builds `daemon` and `reporter` for every supported target
-(Pi/aarch64, Linux x86_64, Windows x86_64) and attaches them to a GitHub
-Release as downloadable `.tar.gz` artifacts:
+The whole project (daemon, reporter, dashboard) shares one version, following
+[Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
 
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
+| Bump | When |
+|---|---|
+| MAJOR | a change that breaks a running setup: the JSON contract, CLI flags, env vars, socket format |
+| MINOR | a new feature that works with existing setups |
+| PATCH | a bug fix |
 
-Every push/PR to `main` also runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+While the version is `0.x`, breaking changes bump MINOR instead of MAJOR.
+
+Commits follow [Conventional Commits](https://www.conventionalcommits.org)
+(`feat:`, `fix:`, `docs:`, ..., `feat!:` or a `BREAKING CHANGE:` footer for breaking
+changes). On every push to `main`, [release-please](https://github.com/googleapis/release-please)
+keeps a release PR open with the next version and the `CHANGELOG.md` entry. Merging that PR
+tags `vX.Y.Z`, creates the GitHub Release, and
+[`.github/workflows/release.yml`](.github/workflows/release.yml) attaches the binaries for
+every target (Pi/aarch64, Linux x86_64, Windows x86_64).
+
+Every push and PR to `main` also runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
 (`cargo build` + `cargo test` for the whole workspace).
 
 ## Setup (once the above is built)

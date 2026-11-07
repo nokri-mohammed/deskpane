@@ -1,3 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["daemon", "reporter"]
+
+# one version for the whole project (daemon, reporter, dashboard), bumped by release-please
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
