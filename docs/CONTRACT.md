@@ -6,6 +6,10 @@ expected back. UDP is fire-and-forget, and a datagram is already a
 message boundary, so no newline terminator or connection handshake is
 needed.
 
+A datagram may carry at most **1500 bytes of JSON**. The daemon
+reads only the first 1500 bytes of a larger one, which leaves broken JSON,
+so the report is dropped. A normal report is a few hundred bytes.
+
 > **v1 has no authentication.** Transport is plain UDP, and anything that
 > can reach port 8765 can post a report under any `device_id` it likes.
 > `PROTOCOL` in `daemon/src/main.rs` is the single switch point for adding
@@ -70,6 +74,13 @@ The Pi stamps its own receive-time on each report and considers a device
 **offline** if no report has arrived in the last `OFFLINE_AFTER_S` seconds
 (default 15s in the daemon, `daemon/src/main.rs`). It drops off the page
 rotation until it reports again.
+
+The daemon keeps at most **32 devices** (`MAX_DEVICES`). When the table is
+full, a report from a new `device_id` is dropped and logged as
+`daemon: device table full, dropping report from <peer>`; devices already in
+the table keep updating. A device silent for more than **5 minutes**
+(`FORGET_AFTER`) is removed from the table entirely, which frees its slot.
+If it reports again later, it comes back as a new device.
 
 This same JSON shape is relayed locally from the daemon to the dashboard
 over a Unix domain socket (see `README.md` → Architecture). The contract

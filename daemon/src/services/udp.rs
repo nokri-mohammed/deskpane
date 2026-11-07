@@ -7,6 +7,9 @@ use std::net::UdpSocket as BlockingUdpSocket;
 
 use tokio::net::UdpSocket as AsyncUdpSocket;
 
+// largest payload the server reads (about one Ethernet frame); longer packets are cut
+pub const MAX_PACKET_BYTES: usize = 1500;
+
 /// Receiving end: bind once, then receive one packet at a time.
 pub struct UdpSocketServer {
     socket: AsyncUdpSocket,
@@ -26,7 +29,7 @@ impl UdpSocketServer {
 
         UdpSocketServer {
             socket: socket,
-            buf: vec![0u8; 8192],
+            buf: vec![0u8; MAX_PACKET_BYTES],
         }
     }
 
@@ -149,14 +152,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_receives_packet_of_exactly_buffer_size_whole() {
+        let (mut server, addr) = start_server().await;
+        let client = AsyncUdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        client.send_to(&vec![7u8; 1500], addr).await.unwrap();
+
+        let (bytes, _) = server.receive().await.unwrap();
+        assert_eq!(bytes.len(), 1500);
+    }
+
+    #[tokio::test]
     async fn server_cuts_packet_bigger_than_buffer() {
         let (mut server, addr) = start_server().await;
         let client = AsyncUdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-        client.send_to(&vec![7u8; 10_000], addr).await.unwrap();
+        client.send_to(&vec![7u8; 2000], addr).await.unwrap();
 
+        // the extra bytes are dropped, not reported as an error
         let (bytes, _) = server.receive().await.unwrap();
-        assert_eq!(bytes.len(), 8192);
+        assert_eq!(bytes.len(), 1500);
     }
 
     #[tokio::test]

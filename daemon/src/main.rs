@@ -4,16 +4,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use daemon::contract::{validate, DeviceStatus, Report};
+use daemon::device_table::{forget_silent, insert_report, DeviceTable};
 use daemon::services::broadcaster::Broadcaster;
 use daemon::services::udp::UdpSocketServer;
 use daemon::services::unix_socket::UnixSocketServer;
 use tokio::sync::RwLock;
 
+// a silent device shows as offline after 15 s, and is removed after 5 min
 const OFFLINE_AFTER: Duration = Duration::from_secs(15);
+const FORGET_AFTER: Duration = Duration::from_secs(300);
+// most devices the table holds, so new device_ids cannot fill memory
+const MAX_DEVICES: usize = 32;
 const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0:8765";
 const DEFAULT_SOCKET_PATH: &str = "/tmp/pi-homelab-dashboard.sock";
 
-type SharedState = Arc<RwLock<HashMap<String, (Report, Instant)>>>;
+type SharedState = Arc<RwLock<DeviceTable>>;
 
 /// Transport the daemon listens on for incoming reports. UDP is the only
 /// one implemented today; Tcp and TcpTls are the planned next steps; add
@@ -70,8 +75,30 @@ async fn udp_server(mut udp_socket_server: UdpSocketServer, state: SharedState) 
             }
         }
 
-        let device_id = report.device_id.clone();
-        state.write().await.insert(device_id, (report, Instant::now()));
+        // store it, unless it is a new device and the table is already full
+        let mut table = state.write().await;
+        let stored = insert_report(&mut table, report, Instant::now(), MAX_DEVICES);
+        // release the write lock before logging
+        drop(table);
+        if !stored {
+            eprintln!("daemon: device table full, dropping report from {peer}");
+        }
+    }
+}
+
+/*
+ * removes devices that have been silent longer than FORGET_AFTER, and logs
+ * each one. Runs once per broadcast tick (see main for why).
+ */
+async fn forget_silent_devices(state: &SharedState) {
+    let mut table = state.write().await;
+    let forgotten = forget_silent(&mut table, Instant::now(), FORGET_AFTER);
+    // release the write lock before logging
+    drop(table);
+
+    let forget_secs = FORGET_AFTER.as_secs();
+    for device_id in &forgotten {
+        eprintln!("daemon: forgot {device_id} after {forget_secs} s of silence");
     }
 }
 
@@ -85,7 +112,8 @@ async fn broadcast_statuses(state: &SharedState, broadcaster: &Broadcaster) {
     // build each device's status (online if seen recently) into one list
     let mut statuses: Vec<DeviceStatus> = Vec::new();
     for (report, last_seen) in snapshot.values() {
-        let silent_for = now.duration_since(*last_seen);
+        // saturating: a report stamped after `now` counts as 0 s silent, never panics
+        let silent_for = now.saturating_duration_since(*last_seen);
 
         let online;
         if silent_for < OFFLINE_AFTER {
@@ -169,12 +197,18 @@ async fn main() {
                 // listen for incoming reports from devices.
                 udp_server(udp_socket_server, state.clone()),
 
-                // every second, build a status summary and broadcast it.
+                /*
+                 * every second, forget long-silent devices, then build a
+                 * status summary and broadcast it. Forgetting here (not on
+                 * insert) means a device disappears on time even when no
+                 * packets arrive, and the per-packet path stays small.
+                 */
                 async {
                     let mut interval = tokio::time::interval(Duration::from_secs(1));
                     loop {
                         // wait for the next 1-second tick
                         interval.tick().await;
+                        forget_silent_devices(&state).await;
                         broadcast_statuses(&state, &broadcaster).await;
                     }
                 },
