@@ -4,13 +4,16 @@
   "include-component-in-tag": false,
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": false,
+  "versioning": "prerelease",
+  "prerelease-type": "beta",
+  "prerelease": true,
   "draft": true,
   "force-tag-creation": true,
   "packages": {
     ".": {
       "package-name": "deskpane",
       "changelog-path": "CHANGELOG.md",
-      "initial-version": "0.1.0",
+      "initial-version": "0.1.0-beta.1",
       "extra-files": [
         {
           "type": "toml",

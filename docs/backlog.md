@@ -2,6 +2,7 @@
 
 ## To Do
 
+- T-024 Photos and animated GIFs of the real screen for the README (CEO provides them; doc-updater places them in docs/media/): [todo 2026-11-07, designer stopped 2026-11-07, CEO provides]
 - T-005 Relay skips RecvError::Lagged instead of disconnecting: [todo 2026-11-07]
 - T-008 Upper limits for totals and uptime (1e308 still accepted in mem/disk totals, uptime): [todo 2026-11-07]
 - T-009 Reporter checks its own report against the contract limits before sending: [todo 2026-11-07]
@@ -19,9 +20,8 @@
 
 ## In Progress
 
-- T-024 Screenshots and animated GIFs of the real stats view, concept mockups for task and canvas views: [todo 2026-11-07, in-progress 2026-11-07 designer]
 
-- T-007 Open-source release v0.1.0 (plans: docs/plans/2026-11-07-open-source-release.md, docs/plans/2026-11-07-release-artifacts.md): [todo 2026-11-07, in-progress 2026-11-07 chief-of-staff (phases 1+2 done), phase 1 approved 2026-11-07 security-reviewer, phase 2 reviewed + phase 3 designed 2026-11-07 architect, CEO approved phase 3 decisions 2026-11-07, phase 3 in-progress architect, phase 4 first pass done 2026-11-07, second pass waits on the project name (T-022), phase 3 done 2026-11-07]
+- T-007 Open-source release v0.1.0 (plans: docs/plans/2026-11-07-open-source-release.md, docs/plans/2026-11-07-release-artifacts.md): [todo 2026-11-07, in-progress 2026-11-07 chief-of-staff (phases 1+2 done), phase 1 approved 2026-11-07 security-reviewer, phase 2 reviewed + phase 3 designed 2026-11-07 architect, CEO approved phase 3 decisions 2026-11-07, phase 3 in-progress architect, phase 4 first pass done 2026-11-07, second pass waits on the project name (T-022), phase 3 done 2026-11-07, beta config 2026-11-07 architect (first release 0.1.0-beta.1)]
 
 ## Blocked
 

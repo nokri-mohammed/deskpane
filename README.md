@@ -134,6 +134,7 @@ The whole project (daemon, reporter, dashboard) shares one version, following
 | PATCH | a bug fix |
 
 While the version is `0.x`, breaking changes bump MINOR instead of MAJOR.
+Pre-releases look like `0.1.0-beta.N` and are marked as pre-release on GitHub.
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org)
 (`feat:`, `fix:`, `docs:`, ..., `feat!:` or a `BREAKING CHANGE:` footer for breaking

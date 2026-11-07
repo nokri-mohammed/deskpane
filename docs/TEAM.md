@@ -29,6 +29,7 @@ flowchart TD
 
     subgraph personal["personal agents"]
         SS["security-specialist<br/>firewall, ports, systemd, Pi provisioning"]
+        DES["designer<br/>visual work and mockups (on call)"]
     end
 
     PAT[["skill: rust-patterns (plugin: patterns)<br/>used by everyone writing or reviewing Rust"]]
@@ -40,6 +41,7 @@ flowchart TD
     COS --> SR
     COS --> DOC
     COS --> SS
+    COS --> DES
     PAT -.-> TDD
     PAT -.-> CR
 ```
@@ -71,3 +73,5 @@ flowchart TD
 | 2026-11-07 | architect | Applied the 14 security review fixes (groups, env mode, [all] block, unit sandboxing, rollback keep, input checks, workflow token and toolchain pin) |
 | 2026-11-07 | architect | T-022: vision, views architecture, MCP task view and canvas design, roadmap, name shortlist (recommends deskpane), rename impact |
 | 2026-11-07 | architect | T-023: renamed to deskpane (binaries, command, paths, units, user, downloads, docs), all checks and fake-root flow pass |
+| 2026-11-07 | designer | T-024 started (capture script, concept mockups), stopped: the CEO will provide the images |
+| 2026-11-07 | architect | Beta release config: first release 0.1.0-beta.1 as a GitHub pre-release, path to 0.1.0 final documented |

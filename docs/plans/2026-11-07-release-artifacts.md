@@ -365,3 +365,33 @@ From security-specialist (install package) and security-reviewer (workflows):
 
 Deferred to T-006: a separate daemon user, a udev rule for the touchscreen only, a sandbox for
 `unbind-fbcon`, more precise uninstall with a state file, and signing.
+
+### Beta releases (2026-11-07)
+
+The first release is `0.1.0-beta.1`, published as a GitHub pre-release. Config in
+`release-please-config.json` (keys checked in release-please's source, `manifest.js` and
+`versioning-strategies/prerelease.js`, and present in the bundle of release-please-action
+v5.0.0):
+
+- `"versioning": "prerelease"`, `"prerelease-type": "beta"`, `"prerelease": true` at the top
+  level; `"initial-version": "0.1.0-beta.1"` on the package. `draft`, `force-tag-creation` and
+  the Cargo.toml / Cargo.lock extra-files stay.
+- With `prerelease: true`, every release after a beta bumps only the beta number, whatever the
+  commit type: `0.1.0-beta.1` then `0.1.0-beta.2`, and so on.
+- `Cargo.toml` stays `0.1.0` until the first release PR. release-please writes
+  `0.1.0-beta.1` into `Cargo.toml` and both `Cargo.lock` entries in that PR. Cargo accepts it,
+  and `cargo build --locked` passes on the result.
+
+From beta to `0.1.0` final, change one key:
+
+```json
+"prerelease": false
+```
+
+The next release PR then proposes `0.1.0` (the beta number is dropped for fix, feat and
+breaking commits alike), and the GitHub release is not marked pre-release. Leave it `false`
+after that. `"prerelease"` must not stay `true` after the final: release-please also marks
+every `0.x` release as pre-release when it is `true`, and its next bump would be
+`0.1.1-beta` (no number). `versioning` and `prerelease-type` can stay; with `prerelease: false`
+they bump like the default strategy. To start a new beta series later, set `prerelease` back to
+`true` and land a commit with a `Release-As: 0.2.0-beta.1` footer.
