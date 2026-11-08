@@ -85,3 +85,25 @@ flowchart TD
 | 2026-11-07 | security-reviewer | Reviewed beta.3 replies: caution, no amplification or limiter flush; must-fix SECURITY.md; fixes: back-off instead of permanent stop, limiter const test, bounded drain, absolute reg.exe path |
 | 2026-11-07 | doc-updater | beta.3 SECURITY.md: daemon replies and their limits, device ids, reply spoofing and squatting until v0.2.0, exit codes |
 | 2026-11-07 | tdd-guide | beta.3 review fixes: reporter backs off 5 min instead of stopping, get.sh check before writing and keeps saved ids, Windows CI check, bounded reply reads, absolute reg.exe path (221 Rust + 18 Python tests) |
+| 2026-11-08 | architect | Idea 1 agent status view: design plan (hooks to `deskpane agent`, agent packet on 8765, agent table, agents page), 6 CEO decisions, tasks T-038 to T-049 |
+| 2026-11-08 | architect | Agent status plan approved; added character packs (section 10), error state, T-038 spike results; new tasks T-050 to T-053 |
+| 2026-11-08 | tdd-guide | Agent status Rust side started: T-039 contract, T-040 agent table, T-041 daemon wiring, T-042 hook client, T-043 hook setup |
+| 2026-11-08 | tdd-guide | Agent status screen and characters started: T-044 dashboard, T-050 charpack helpers, T-051 pack install, T-052 sprites, T-053 license guards |
+| 2026-11-08 | tdd-guide | Agent status Rust side done: T-039 to T-043 test first (221 to 405 Rust tests), silent_s, settings backup fix |
+| 2026-11-08 | tdd-guide | Agent status screen and characters done: T-044, T-050 to T-053 (18 to 169 Python tests), real pack validated, renders |
+| 2026-11-08 | code-reviewer | T-045 review: approve with follow-ups; 2 MEDIUM (symlinked settings.json and temp file mode, parallel subagents hide needs_you), 6 LOW |
+| 2026-11-08 | security-reviewer | T-045 review: caution; 2 MEDIUM (settings backups world-readable, home folder name leaks as project), 8 LOW; SECURITY.md needs 4 new sections |
+| 2026-11-08 | security-specialist | T-045 install review: caution, 2 must-fix (get.sh order before pack check, install.sh must not die on pack failure), 8 cheap fixes, 3 deferred |
+| 2026-11-08 | designer | Agents page visual pass: hinting-free small text (fixes "homel ab"), emote clear of the head, NEEDS YOU badge, card hierarchy; dashboard.py only |
+| 2026-11-08 | tdd-guide | T-045 Rust fix round started: settings file modes and symlinks, home folder project, parallel subagent needs_you (sub field), table and log fixes |
+| 2026-11-08 | tdd-guide | T-045 install fix round started: get.sh check order, install.sh pack failure, zip open by fd, rollback, fsync, licence guard |
+| 2026-11-08 | tdd-guide | T-045 install fix round done: get.sh checks the pack first, install.sh survives a pack failure, zip read once by fd, swap rollback, fsync, CDPATH-safe paths, stronger licence guard (172 to 193 Python tests) |
+| 2026-11-08 | tdd-guide | Page and focus logic moved from dashboard.py into tested layout.py helpers (code-review LOW 3) started |
+| 2026-11-08 | tdd-guide | T-045 Rust fix round done: settings files 0600 and symlink-safe, home folder hidden, parallel subagent needs_you (sub key), recently ended, takeover cap, log fixes (405 to 443 Rust tests) |
+| 2026-11-08 | tdd-guide | Page and focus logic moved into tested layout.py and charpack.py helpers, screen pixel-identical (193 to 213 Python tests) |
+| 2026-11-08 | code-reviewer | T-045 final pass: approve, no HIGH or MEDIUM; 4 small pi fixes and an optional per-key reorder time (T-054) |
+| 2026-11-08 | doc-updater | T-046 docs for the agent view and character packs: CONTRACT, INSTALL, SECURITY (4 sections), new CHARACTERS, README, IDEAS, CONTRIBUTING, backlog |
+| 2026-11-08 | doc-updater | T-046 docs: CONTRACT.md agent packet and socket line, INSTALL.md hook setup and --characters, SECURITY.md four sections, new CHARACTERS.md, README, IDEAS, CONTRIBUTING |
+| 2026-11-08 | tdd-guide | Four small drawing fixes: clip restored on error, focus return kept, text measure cache with smaller cap for big fonts, pygame note (214 Python tests, screens pixel-identical) |
+| 2026-11-08 | security-reviewer | T-045 re-check of the fix round started (settings files, home folder, sub field, recently ended, zip install) |
+| 2026-11-08 | security-reviewer | T-045 re-check: safe to commit, no CRITICAL/HIGH/MEDIUM; 4 LOW logged (T-054, T-055) |

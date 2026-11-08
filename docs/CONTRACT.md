@@ -184,9 +184,119 @@ and exits (exit 10 and 12 come only from `--once`):
 > too. Authenticating UDP reports and replies (T-006) is scheduled for
 > v0.2.0, reusing the token store planned for the control API.
 
-This same JSON shape is relayed locally from the daemon to the dashboard
-over a Unix domain socket (see "How it works" in
-[CONTRIBUTING.md](../CONTRIBUTING.md#how-it-works)). Each line is a JSON array of
-`DeviceStatus`: the report fields plus `"online": true` or `false`, sent once a
-second. The report contract doesn't change, only the transport does for that
-last hop.
+## Agent status packets
+
+The same port also takes a second kind of packet: the status of one AI agent session (Claude
+Code, sent by its hooks through `deskpane agent`). A packet with no `kind` is a stats report, as
+above, so every old reporter keeps working. A packet with `"kind": "agent"` is an agent packet.
+Any other `kind` is dropped, and the log line does not repeat the value.
+
+```json
+{"kind":"agent","v":1,"sid":"3f9a0c41b2d7","device_id":"dp-3f9a0c41","project":"my-project","state":"needs_you","doing":"allow Bash?","t":1794152400123}
+```
+
+| Field | Type | Rule |
+|---|---|---|
+| `kind` | string | Exactly `"agent"`. |
+| `v` | integer | Agent packet version, `1`. Any other value drops the packet. |
+| `sid` | string | The session key: exactly 12 lowercase hex characters. The client makes it from the Claude Code session id with SHA-256, so the raw session id never leaves the machine. |
+| `device_id` | string | The same id rule as for reports. The screen uses it to show the label of the machine. |
+| `project` | string | 0 to 32 bytes (UTF-8 bytes, not characters). May be empty: the screen then shows `?`. |
+| `state` | string | One of `idle`, `working`, `done`, `needs_you`, `error`, `ended`. |
+| `doing` | string | 0 to 32 bytes. A short fixed word or a tool name, for example `allow Bash?`, `thinking`, `API error: rate_limit`. May be empty. |
+| `t` | integer | The sender's clock, in milliseconds since the Unix epoch. Zero or more. The daemon uses it only to put packets of one session in order. |
+| `sub` | string, optional | Set only by a subagent: exactly 8 lowercase hex characters, a hash of the subagent id. A missing `sub` means the main agent. |
+| `ctx` | integer, optional | 0 to 100, context used in percent. Reserved: the client does not send it yet, and the screen does not show it. |
+
+The states mean:
+
+| `state` | Meaning |
+|---|---|
+| `idle` | The session started and waits for a prompt. |
+| `working` | A prompt or a tool is running. |
+| `done` | The turn is over. |
+| `needs_you` | The agent waits for you (a permission, a question or input). |
+| `error` | The turn ended with an API error. `doing` names it. |
+| `ended` | The session closed. The daemon removes the row. |
+
+Limits (`validate_agent` in `daemon/src/contract.rs`):
+
+- `project` and `doing` have no control characters and no Unicode format characters (right to
+  left overrides, zero width spaces and similar). They draw nothing but could hide or reorder
+  text on the screen.
+- An unknown field is ignored, so a later optional field does not need a new `v`.
+- A packet that breaks a rule is dropped as a whole. The log line names the field and never
+  repeats the bad text.
+- The largest valid packet is well under the 1500-byte read limit.
+
+### Subagents and `sub`
+
+Claude Code can run several subagents at once. Each subagent packet carries its own `sub`. The
+daemon keeps a short list of the `sub` keys that wait for you, at most 8 for each session
+(`MAX_PENDING_PER_SESSION`). The row stays `needs_you` while any of them waits, even when
+another subagent of the same session keeps working. An answer from one `sub` clears only that
+`sub`. Packets of different `sub` keys are never compared by `t`, because parallel subagents
+send at their own pace.
+
+### Daemon rules for agent packets
+
+| Situation | Result |
+|---|---|
+| `ended` for a session in the table, from its owner IP | the row is removed |
+| `ended` for a session the daemon does not know | ignored |
+| A packet for a session that ended a moment ago | dropped, when it arrives inside the 5 s reorder window |
+| The session belongs to another IP that sent something in the last 120 s | dropped |
+| The session belongs to another IP that has been silent for 120 s or more | stored, the sender is now the owner |
+| A packet older than the stored one of the same key by less than 5 s | dropped (a late packet) |
+| A packet older by 5 s or more | stored (the sender's clock jumped back) |
+| A new session, and that IP already owns 8 sessions | dropped |
+| A new session, and the table has 16 sessions | the oldest `idle`, `done` or `error` row is replaced; with none, the packet is dropped |
+
+The numbers are `MAX_AGENTS` (16), `MAX_AGENTS_PER_SOURCE` (8), `AGENT_TAKEOVER_AFTER` (120 s) and
+`AGENT_REORDER_WINDOW` (5 s) in `daemon/src/main.rs`. A session with no packet for 4 hours
+(`AGENT_FORGET_AFTER`) is forgotten, whatever its state. A `working` session with no packet for
+10 minutes (`AGENT_QUIET_AFTER`) is marked `quiet`.
+
+**Agent packets get no reply.** The daemon never answers one, not for an accepted packet, not for
+a refused one. A client that waits for an answer waits for nothing. `deskpane agent test` shows
+a fake session on the screen instead. Refusals and bad packets go to the daemon log through a
+limiter: at most one line per source per 10 s. A new session and a forgotten session get one
+line each.
+
+An old daemon (before the agent view) reads an agent packet as a broken report and drops it with
+one log line. Upgrade the Pi first.
+
+## The socket line
+
+The daemon relays what it knows to the dashboard over a Unix domain socket (see "How it works"
+in [CONTRIBUTING.md](../CONTRIBUTING.md#how-it-works)), one JSON line a second. A line is an
+envelope with one key for each view:
+
+```json
+{"v":1,"views":{"stats":{"devices":[]},"agents":{"sessions":[]}}}
+```
+
+| Field | Rule |
+|---|---|
+| `v` | Envelope version, `1`. |
+| `views.stats.devices` | The list of `DeviceStatus`: the report fields plus `"online": true` or `false`. Same content as the bare array of v0.1.x lines. |
+| `views.agents.sessions` | The list of agent sessions, below. Empty when none. |
+
+Each session:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `sid` | string | The 12 hex session key. |
+| `device_id` | string | The id from the packet. |
+| `label` | string | The label of the device with that id, or empty when no reporter runs with it. The screen then shows the id. |
+| `project` | string | As sent. Empty means `?`. |
+| `state` | string | One of the six states. |
+| `doing` | string | As sent. While a subagent waits, the question of the oldest waiting one. |
+| `running_s` | integer | Seconds since the daemon first saw the session. Resets when the Pi restarts. |
+| `state_s` | integer | Seconds since the state last changed. |
+| `silent_s` | integer | Seconds since the last packet. |
+| `quiet` | bool | `true` for a `working` session with no packet for 10 minutes. Never set for other states. |
+| `ctx` | integer or null | Always present. `null` until the client sends context use. |
+
+The dashboard also still reads the old bare array of `DeviceStatus`, so a new dashboard works
+with an old daemon. The report contract does not change, only the last hop does.
