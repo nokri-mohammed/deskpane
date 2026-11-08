@@ -107,3 +107,4 @@ flowchart TD
 | 2026-11-08 | tdd-guide | Four small drawing fixes: clip restored on error, focus return kept, text measure cache with smaller cap for big fonts, pygame note (214 Python tests, screens pixel-identical) |
 | 2026-11-08 | security-reviewer | T-045 re-check of the fix round started (settings files, home folder, sub field, recently ended, zip install) |
 | 2026-11-08 | security-reviewer | T-045 re-check: safe to commit, no CRITICAL/HIGH/MEDIUM; 4 LOW logged (T-054, T-055) |
+| 2026-11-08 | chief of staff | Committed the agent status view as 4 commits on feat/agent-status-view, pushed, opened the pull request |
