@@ -19,6 +19,8 @@ Environment=SOCKET_PATH=/run/deskpane/daemon.sock
 ExecStart=/opt/deskpane/current/bin/deskpane-daemon
 Restart=always
 RestartSec=2
+# exit 11 means UDP 8765 is taken by another program: restarting cannot fix that
+RestartPreventExitStatus=11
 
 # sandbox (security-specialist, T-010): must be confirmed on the real Pi before release
 NoNewPrivileges=yes

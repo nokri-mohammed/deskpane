@@ -1,8 +1,8 @@
 """Dashboard: reads the daemon's device-status broadcast over a Unix
 socket and renders it onto the Pi's framebuffer touchscreen, in the
 animated ring-gauge style of the original single-device prototype.
-Page 0 is an overview (clock, date, device count); pages after that are
-one per device. Tap the screen (see touch.py) to cycle pages.
+Page 0 is an overview (clock, date, device count, version); pages after
+that are one per device. Tap the screen (see touch.py) to cycle pages.
 """
 import json
 import math
@@ -17,6 +17,7 @@ import traceback
 import pygame
 
 from fb_display import FrameBuffer, detect_touchscreen_fb
+from layout import overview_layout, read_version, version_position, version_text
 from touch import TouchWatcher
 
 SOCKET_PATH = os.environ.get("SOCKET_PATH", "/run/deskpane/daemon.sock")
@@ -244,31 +245,12 @@ def draw_pulse_dot(surface, pos, t0, now):
     pygame.draw.circle(surface, color, pos, 4)
 
 
-def overview_layout(width, height):
-    """Fixed screen positions for the overview page."""
-    clock_y = height // 2 - 76
-    date_y = clock_y + 72
-    summary_y = date_y + 26
-    divider_y = summary_y + 26
-    return {
-        "clock_y": clock_y,
-        "date_y": date_y,
-        "summary_y": summary_y,
-        "divider_y": divider_y,
-    }
-
-
-def draw_overview(surface, fonts, devices, connected, t0, now, width, height):
+def draw_overview(surface, fonts, devices, connected, t0, now, width, height, version):
     surface.fill(BG)
-    layout = overview_layout(width, height)
 
+    # render first: the layout centres the block from the real text heights
     clock_surf = fonts["clock"].render(time.strftime("%H:%M"), True, TEXT)
-    clock_y = layout["clock_y"]
-    surface.blit(clock_surf, (width // 2 - clock_surf.get_width() // 2, clock_y))
-
     date_surf = fonts["small"].render(time.strftime("%A, %d %B %Y"), True, SUBTEXT)
-    date_y = layout["date_y"]
-    surface.blit(date_surf, (width // 2 - date_surf.get_width() // 2, date_y))
 
     online_count = sum(1 for d in devices if d.get("online"))
     total_count = len(devices)
@@ -283,14 +265,20 @@ def draw_overview(surface, fonts, devices, connected, t0, now, width, height):
         summary_color = ACCENT if online_count == total_count else WARN
 
     summary_surf = fonts["tiny"].render(summary_text, True, summary_color)
+
+    layout = overview_layout(width, height, clock_surf.get_height(), date_surf.get_height(), summary_surf.get_height())
+    surface.blit(clock_surf, (width // 2 - clock_surf.get_width() // 2, layout["clock_y"]))
+    surface.blit(date_surf, (width // 2 - date_surf.get_width() // 2, layout["date_y"]))
+
     summary_y = layout["summary_y"]
     summary_x = width // 2 - summary_surf.get_width() // 2
     surface.blit(summary_surf, (summary_x, summary_y))
     if connected and total_count:
         draw_pulse_dot(surface, (summary_x - 12, summary_y + summary_surf.get_height() // 2), t0, now)
 
-    divider_y = layout["divider_y"]
-    pygame.draw.line(surface, (40, 42, 50), (40, divider_y), (width - 40, divider_y), 1)
+    # version in the free bottom-left corner (dots bottom centre, network icon bottom right)
+    version_surf = fonts["tiny"].render(version_text(version), True, SUBTEXT)
+    surface.blit(version_surf, version_position(height, version_surf.get_height()))
 
 
 class DeviceView:
@@ -369,12 +357,15 @@ def main():
     width, height = surface.get_size()
 
     fonts = {
-        "clock": pygame.font.Font(None, 84),
+        "clock": pygame.font.Font(None, 120),
         "big": pygame.font.Font(None, 40),
         "mid": pygame.font.Font(None, 26),
         "small": pygame.font.Font(None, 20),
         "tiny": pygame.font.Font(None, 16),
     }
+
+    # read once: the VERSION file sits one folder above this dashboard folder
+    version = read_version(os.path.dirname(os.path.abspath(__file__)))
 
     reader = SocketReader()
     touch = TouchWatcher(screen_size=(width, height))
@@ -433,7 +424,7 @@ def main():
                 else:
                     page %= total_pages
                     if page == 0:
-                        draw_overview(surface, fonts, devices, reader.connected, t0, now, width, height)
+                        draw_overview(surface, fonts, devices, reader.connected, t0, now, width, height, version)
                     else:
                         device = devices[page - 1]
                         view = views.setdefault(device["device_id"], DeviceView())

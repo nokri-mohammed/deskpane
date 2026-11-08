@@ -26,8 +26,19 @@ In version 0.1.x there is no authentication and no encryption:
 - A device on the network can send reports with up to 32 different ids. This fills the device
   table, and the daemon then drops reports from new devices. Your existing devices keep
   updating.
+- A device on the network can send reports with the id of one of your devices before that
+  device does ("squatting"). The daemon then refuses your real device while the other device
+  keeps sending. See [Replies from the daemon](#replies-from-the-daemon).
 
-An authenticated transport (TCP with mutual TLS) is planned. It has no release date.
+UDP authentication for reports and replies is planned for v0.2.0. An authenticated transport
+(TCP with mutual TLS) is also planned. It has no release date.
+
+## Device ids
+
+By default, the reporter makes the device id from the machine id. The id is `dp-` plus 8 hex
+characters of a SHA-256 hash over a fixed deskpane prefix and the machine id. For example:
+`dp-3f9a0c41`. The raw machine id never leaves the machine. You can set your own id with
+`--device-id`.
 
 ## What the daemon does to limit damage
 
@@ -56,7 +67,48 @@ What the installer does on the Pi:
   project. It checks the file's SHA-256 hash before it writes anything to `/boot`.
 - Each release has a `SHA256SUMS` file, so you can check your downloads.
 
-The reporter on your other computers only sends. It does not accept input from the network.
+## Replies from the daemon
+
+From version 0.1.0-beta.3, the daemon can send a small UDP reply to a reporter. The daemon
+sends a reply only after a report passes all checks. It never replies to broken or rejected
+packets. There are two replies:
+
+- `id_in_use`: another IP address already uses this device id. The reply names that owner IP.
+- `ok`: the report was received. The daemon sends it only when the report asks for it with
+  `"ack": true`. `deskpane report --once` asks for it.
+
+[docs/CONTRACT.md](docs/CONTRACT.md) shows the shape of each reply.
+
+Limits on replies:
+
+- A reply is at most 192 bytes. It is always smaller than the report that caused it, so the
+  daemon cannot amplify traffic.
+- The daemon sends at most 1 reply to each source IP every 10 seconds.
+- The daemon sends at most 20 replies each second in total.
+- The daemon remembers at most 256 source IPs for these limits. It forgets the oldest first.
+
+What the reporter does with replies:
+
+- The reporter's socket is connected to the daemon's address. The reporter only accepts
+  packets from that IP address and port.
+- It ignores replies about other device ids.
+- It never prints text from a reply, except the checked device id and a parsed IP address.
+
+Limits of this design:
+
+- Reports and replies are not authenticated. A device on your network can forge an
+  `id_in_use` reply. It can also take the id of one of your devices first. In both cases, the
+  reporter pauses its reports for 5 minutes and then tries again. It does not stop for good.
+- The daemon tracks the owner of each id by IP address. Reporters behind the same NAT router
+  share one IP address, so the daemon cannot tell them apart.
+
+## Exit codes
+
+| Program | Exit code | Meaning |
+|---|---|---|
+| `deskpane-daemon` | 11 | UDP port 8765 is in use by another program. systemd does not restart the daemon. |
+| `deskpane report --once` | 10 | Another machine uses this device id. |
+| `deskpane report --once` | 12 | No answer from the daemon. |
 
 ## Recommendations
 

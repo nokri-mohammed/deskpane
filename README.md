@@ -47,8 +47,11 @@ On each other computer, get `deskpane` from the
 Pi's IP address:
 
 ```bash
-deskpane report --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"
+deskpane report --daemon 192.168.1.50:8765
 ```
+
+The device id is made from the machine id and the label is the hostname; add
+`--device-id my-pc --label "My PC"` to pick your own.
 
 Step by step for Linux, Windows and a manual install: [docs/INSTALL.md](docs/INSTALL.md).
 

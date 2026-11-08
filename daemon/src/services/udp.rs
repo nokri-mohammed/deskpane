@@ -1,6 +1,7 @@
-//! Both ends of a UDP link: `UdpSocketServer` receives packets (async, used
-//! by the daemon) and `UdpClient` sends them to one address (blocking, used
-//! by the reporter). What the bytes mean is the caller's job.
+//! Both ends of a UDP link: `UdpSocketServer` receives packets and answers
+//! them (async, used by the daemon) and `UdpClient` sends to one address and
+//! reads its replies without waiting (blocking, used by the reporter). What
+//! the bytes mean is the caller's job.
 
 use std::net::SocketAddr;
 use std::net::UdpSocket as BlockingUdpSocket;
@@ -17,19 +18,46 @@ pub struct UdpSocketServer {
 }
 
 impl UdpSocketServer {
-    pub async fn new(addr: &str) -> Self {
-        // bind the socket; fatal if it fails
+    /*
+     * binds the socket; returns the error so the caller decides what it means
+     * (for example "port in use" gets its own message and exit code)
+     *
+     * addr: address to listen on, e.g. 0.0.0.0:8765
+     */
+    pub async fn try_new(addr: &str) -> Result<Self, std::io::Error> {
         let bound = AsyncUdpSocket::bind(addr).await;
         let socket = match bound {
             Ok(s) => s,
-            Err(e) => panic!("bind udp {addr}: {e}"),
+            Err(e) => return Err(e),
         };
 
         println!("udp: listening on {addr}");
 
-        UdpSocketServer {
+        let server = UdpSocketServer {
             socket: socket,
             buf: vec![0u8; MAX_PACKET_BYTES],
+        };
+        Ok(server)
+    }
+
+    // the address the socket is bound to; None if the OS cannot say
+    pub fn local_addr(&self) -> Option<SocketAddr> {
+        let addr = self.socket.local_addr();
+        match addr {
+            Ok(a) => Some(a),
+            Err(_) => None,
+        }
+    }
+
+    // sends one packet to peer; logs and returns false on failure
+    pub async fn send_to(&self, bytes: &[u8], peer: SocketAddr) -> bool {
+        let sent = self.socket.send_to(bytes, peer).await;
+        match sent {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("udp: send to {peer} failed: {e}");
+                false
+            }
         }
     }
 
@@ -46,7 +74,32 @@ impl UdpSocketServer {
     }
 }
 
-/// Sending end: every packet goes to the one address given to `new`.
+/// What one non-blocking read on the client found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Received {
+    // a packet of this many bytes is in the buffer
+    Packet(usize),
+    // nothing waiting right now
+    Nothing,
+    // the target answered "port unreachable": nobody listens there
+    Refused,
+}
+
+/*
+ * what a failed non-blocking read means: nothing waiting, or the target is
+ * not listening (Linux says ConnectionRefused, Windows says ConnectionReset
+ * for the same ICMP "port unreachable"); anything else counts as nothing
+ */
+fn classify_recv_error(kind: std::io::ErrorKind) -> Received {
+    match kind {
+        std::io::ErrorKind::ConnectionRefused => Received::Refused,
+        std::io::ErrorKind::ConnectionReset => Received::Refused,
+        _ => Received::Nothing,
+    }
+}
+
+/// Sending end: every packet goes to the one address given to `new`, and
+/// only packets from that address are received.
 pub struct UdpClient {
     socket: BlockingUdpSocket,
 }
@@ -79,6 +132,44 @@ impl UdpClient {
         }
     }
 
+    /*
+     * reads one waiting packet without blocking. The socket is connected, so
+     * the OS only delivers packets from the target address.
+     *
+     * buf: where the packet goes (longer packets are cut to its size)
+     * returns: Packet(len), Nothing, or Refused when the target is not listening
+     */
+    pub fn try_receive(&self, buf: &mut [u8]) -> Received {
+        // non-blocking only for this one read, so send keeps its normal behaviour
+        let switched = self.socket.set_nonblocking(true);
+        match switched {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("udp: cannot switch to non-blocking: {e}");
+                return Received::Nothing;
+            }
+        }
+
+        let read = self.socket.recv(buf);
+
+        let restored = self.socket.set_nonblocking(false);
+        match restored {
+            Ok(_) => {}
+            Err(e) => eprintln!("udp: cannot switch back to blocking: {e}"),
+        }
+
+        match read {
+            Ok(len) => Received::Packet(len),
+            Err(e) => {
+                let received = classify_recv_error(e.kind());
+                if e.kind() != std::io::ErrorKind::WouldBlock && received == Received::Nothing {
+                    eprintln!("udp: recv error: {e}");
+                }
+                received
+            }
+        }
+    }
+
     // sends one packet; logs and returns false on failure
     pub fn send(&self, bytes: &[u8]) -> bool {
         let sent = self.socket.send(bytes);
@@ -95,11 +186,12 @@ impl UdpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
     use std::time::Duration;
 
     // binds a server on a free port and returns it with its real address
     async fn start_server() -> (UdpSocketServer, SocketAddr) {
-        let server = UdpSocketServer::new("127.0.0.1:0").await;
+        let server = UdpSocketServer::try_new("127.0.0.1:0").await.unwrap();
         let addr = server.socket.local_addr().unwrap();
         (server, addr)
     }
@@ -177,17 +269,27 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "bind udp")]
-    async fn server_binding_an_address_already_in_use_panics() {
-        let (_server, addr) = start_server().await;
-
-        UdpSocketServer::new(&addr.to_string()).await;
+    async fn try_new_on_free_port_succeeds() {
+        let bound = UdpSocketServer::try_new("127.0.0.1:0").await;
+        assert!(bound.is_ok());
     }
 
     #[tokio::test]
-    #[should_panic(expected = "bind udp")]
-    async fn server_binding_an_invalid_address_panics() {
-        UdpSocketServer::new("not-an-address").await;
+    async fn try_new_on_port_in_use_returns_addr_in_use() {
+        let (_server, addr) = start_server().await;
+
+        let bound = UdpSocketServer::try_new(&addr.to_string()).await;
+
+        match bound {
+            Ok(_) => panic!("expected the second bind to fail"),
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse),
+        }
+    }
+
+    #[tokio::test]
+    async fn try_new_on_invalid_address_returns_error() {
+        let bound = UdpSocketServer::try_new("not-an-address").await;
+        assert!(bound.is_err());
     }
 
     // client tests
@@ -266,6 +368,137 @@ mod tests {
     }
 
     // both ends together, the way the reporter and daemon use them
+
+    #[tokio::test]
+    async fn server_local_addr_is_the_bound_address() {
+        let (server, addr) = start_server().await;
+        assert_eq!(server.local_addr(), Some(addr));
+    }
+
+    #[tokio::test]
+    async fn server_send_to_reaches_the_client() {
+        let (mut server, addr) = start_server().await;
+        let client = UdpClient::new(&addr.to_string());
+        client.send(b"report");
+        let (_, peer) = server.receive().await.unwrap();
+
+        assert!(server.send_to(b"reply", peer).await);
+
+        // give the loopback a moment, then read without blocking
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut buf = [0u8; 64];
+        let received = client.try_receive(&mut buf);
+        assert_eq!(received, Received::Packet(5));
+        assert_eq!(&buf[..5], b"reply");
+    }
+
+    #[tokio::test]
+    async fn server_send_to_a_too_big_packet_returns_false() {
+        let (server, _addr) = start_server().await;
+        let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        assert!(!server.send_to(&vec![0u8; 70_000], peer).await);
+    }
+
+    #[test]
+    fn recv_error_would_block_is_nothing() {
+        assert_eq!(
+            classify_recv_error(ErrorKind::WouldBlock),
+            Received::Nothing
+        );
+    }
+
+    #[test]
+    fn recv_error_connection_refused_is_refused() {
+        // Linux: ICMP port unreachable on a connected socket
+        assert_eq!(
+            classify_recv_error(ErrorKind::ConnectionRefused),
+            Received::Refused
+        );
+    }
+
+    #[test]
+    fn recv_error_connection_reset_is_refused() {
+        // Windows reports the same ICMP error as WSAECONNRESET
+        assert_eq!(
+            classify_recv_error(ErrorKind::ConnectionReset),
+            Received::Refused
+        );
+    }
+
+    #[test]
+    fn recv_error_anything_else_is_nothing() {
+        assert_eq!(classify_recv_error(ErrorKind::Other), Received::Nothing);
+        assert_eq!(
+            classify_recv_error(ErrorKind::Interrupted),
+            Received::Nothing
+        );
+    }
+
+    #[test]
+    fn client_try_receive_returns_nothing_when_no_packet() {
+        let (_receiver, addr) = blocking_receiver();
+        let client = UdpClient::new(&addr);
+
+        let mut buf = [0u8; 64];
+        assert_eq!(client.try_receive(&mut buf), Received::Nothing);
+    }
+
+    #[test]
+    fn client_try_receive_returns_the_reply() {
+        let (receiver, addr) = blocking_receiver();
+        let client = UdpClient::new(&addr);
+        client.send(b"ping");
+        let mut buf = [0u8; 64];
+        let (_, client_addr) = receiver.recv_from(&mut buf).unwrap();
+        receiver.send_to(b"pong", client_addr).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        let received = client.try_receive(&mut buf);
+
+        assert_eq!(received, Received::Packet(4));
+        assert_eq!(&buf[..4], b"pong");
+        // the reply was taken, so the next read finds nothing
+        assert_eq!(client.try_receive(&mut buf), Received::Nothing);
+    }
+
+    #[test]
+    fn client_try_receive_ignores_packets_from_other_addresses() {
+        let (_receiver, addr) = blocking_receiver();
+        let client = UdpClient::new(&addr);
+        let client_addr = client.socket.local_addr().unwrap();
+        let stranger = BlockingUdpSocket::bind("127.0.0.1:0").unwrap();
+        let target = format!("127.0.0.1:{}", client_addr.port());
+        stranger.send_to(b"forged", target).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut buf = [0u8; 64];
+        assert_eq!(client.try_receive(&mut buf), Received::Nothing);
+    }
+
+    #[test]
+    fn client_try_receive_reports_refused_when_nobody_listens() {
+        let (receiver, addr) = blocking_receiver();
+        drop(receiver);
+        let client = UdpClient::new(&addr);
+        client.send(b"anyone?");
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut buf = [0u8; 64];
+        assert_eq!(client.try_receive(&mut buf), Received::Refused);
+    }
+
+    #[test]
+    fn client_still_sends_after_try_receive() {
+        // try_receive switches to non-blocking only for its own read
+        let (receiver, addr) = blocking_receiver();
+        let client = UdpClient::new(&addr);
+        let mut buf = [0u8; 64];
+        client.try_receive(&mut buf);
+
+        assert!(client.send(b"after"));
+        let (len, _) = receiver.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..len], b"after");
+    }
 
     #[tokio::test]
     async fn client_packet_reaches_server() {

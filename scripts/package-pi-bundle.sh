@@ -69,7 +69,7 @@ echo "$VERSION" >"$DIR/VERSION"
 install -m 0644 "$REPO/LICENSE" "$REPO/deploy/README.txt" "$REPO/deploy/overlay.env" "$DIR/"
 install -m 0755 "$REPO/deploy/install.sh" "$REPO/deploy/uninstall.sh" "$DIR/"
 install -m 0755 "$BIN_DIR/deskpane-daemon" "$BIN_DIR/deskpane" "$DIR/bin/"
-install -m 0644 "$REPO/pi/dashboard.py" "$REPO/pi/fb_display.py" "$REPO/pi/touch.py" "$DIR/dashboard/"
+install -m 0644 "$REPO/pi/dashboard.py" "$REPO/pi/fb_display.py" "$REPO/pi/touch.py" "$REPO/pi/layout.py" "$DIR/dashboard/"
 install -m 0644 "$REPO"/deploy/systemd/*.service "$DIR/systemd/"
 install -m 0644 "$REPO/deploy/env.example" "$DIR/config/"
 

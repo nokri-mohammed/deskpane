@@ -14,8 +14,8 @@
 #   --no-reboot          do not reboot after the first install, even if the screen needs it
 #   --no-display         Pi without the touchscreen (passed to install.sh)
 #   --no-reporter        do not report the Pi's own stats (passed to install.sh)
-#   --device-id ID       device id for this machine's reporter
-#   --label TEXT         name shown on the dashboard for this machine
+#   --device-id ID       device id for this machine's reporter (default: automatic, from the machine id)
+#   --label TEXT         name shown on the dashboard for this machine (default: the hostname)
 #   --reporter-only      install only the `deskpane` client to /usr/local/bin (any Linux)
 #   --daemon HOST:PORT   with --reporter-only: report to this Pi at boot (systemd unit)
 #
@@ -121,6 +121,13 @@ die() {
 
 # print a step
 say() { echo "==> $*"; }
+
+# value of KEY=value from a plain file (never sourced as shell code); empty if missing
+read_key() {
+  if [[ -f "$2" ]]; then
+    sed -n "s/^$1=//p" "$2" | head -n 1
+  fi
+}
 
 # newest release tag, pre-releases included (the API lists newest first, drafts are hidden)
 find_newest_release() {
@@ -293,8 +300,8 @@ install_pi() {
   echo
   echo "On each other Linux machine, one line installs the client and reports at boot:"
   echo "  curl -fsSL https://raw.githubusercontent.com/nokri-mohammed/deskpane/main/get.sh | sudo bash -s -- --reporter-only --daemon ${ip:-<pi-ip>}:8765"
-  echo "Or run the client by hand:"
-  echo "  deskpane report --daemon ${ip:-<pi-ip>}:8765 --device-id my-pc --label \"My PC\""
+  echo "Or run the client by hand (id and label are automatic, or pass --device-id and --label):"
+  echo "  deskpane report --daemon ${ip:-<pi-ip>}:8765"
 
   local with_display=1 arg
   for arg in "${install_args[@]}"; do
@@ -329,18 +336,28 @@ install_client() {
     die "this is the Pi; its reporter is already installed by the Pi install"
   fi
 
-  # check the reporter settings before downloading anything
+  # check the reporter settings before downloading anything; an empty id or
+  # label is left to the client (automatic id from the machine id, hostname label)
+  local env_file="$DESTDIR/etc/deskpane/reporter.env"
   if [[ -n "$daemon_addr" ]]; then
     [[ "$daemon_addr" =~ ^[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] || die "--daemon must look like 192.168.1.50:8765"
+    # an upgrade keeps the id and label this machine already reports with
     if [[ -z "$device_id" ]]; then
-      device_id="$(hostname -s 2>/dev/null | tr -c 'A-Za-z0-9._\n-' '-' | cut -c1-64)"
+      device_id="$(read_key DEVICE_ID "$env_file")"
+      if [[ -n "$device_id" ]]; then
+        say "keeping the device id from /etc/deskpane/reporter.env: $device_id"
+      fi
     fi
     if [[ -z "$label" ]]; then
-      label="$device_id"
+      label="$(read_key LABEL "$env_file")"
     fi
-    [[ "$device_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || die "--device-id: 1 to 64 letters, digits, dot, dash or underscore, starting with a letter or digit"
+    if [[ -n "$device_id" && ! "$device_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+      die "--device-id: 1 to 64 letters, digits, dot, dash or underscore, starting with a letter or digit"
+    fi
     local label_pattern='^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,63}$'
-    [[ "$label" =~ $label_pattern ]] || die "--label: up to 64 letters, digits, spaces and . _ ( ) -, starting with a letter or digit"
+    if [[ -n "$label" && ! "$label" =~ $label_pattern ]]; then
+      die "--label: up to 64 letters, digits, spaces and . _ ( ) -, starting with a letter or digit"
+    fi
   fi
 
   download_verified "$download_url" "$version" "$asset"
@@ -353,10 +370,47 @@ install_client() {
   say "installed /usr/local/bin/deskpane ($version)"
 
   if [[ -z "$daemon_addr" ]]; then
-    echo "Run it with: deskpane report --daemon <pi-ip>:8765 --device-id my-pc --label \"My PC\""
+    echo "Run it with: deskpane report --daemon <pi-ip>:8765 (id and label are automatic)"
     echo "Or run get.sh again with --daemon <pi-ip>:8765 to report at boot."
     return 0
   fi
+
+  # one report that asks the Pi for an answer, before any setting or unit is
+  # written, so a failed check leaves an existing working setup as it was
+  local once_args=(report --once --daemon "$daemon_addr") rc=0
+  if [[ -n "$device_id" ]]; then
+    once_args+=(--device-id "$device_id")
+  fi
+  if [[ -n "$label" ]]; then
+    once_args+=(--label "$label")
+  fi
+  # clients older than 0.1.0-beta.3 (--version) have no --once and need an id
+  if ! "$DESTDIR/usr/local/bin/deskpane" report --help 2>/dev/null | grep -q -- '--once'; then
+    [[ -n "$device_id" ]] || die "deskpane $version needs --device-id (automatic ids start with 0.1.0-beta.3)"
+    echo "get.sh: warning: deskpane $version cannot check the connection (no --once); skipping the check" >&2
+    rc=12
+  else
+    say "checking the connection to $daemon_addr"
+    "$DESTDIR/usr/local/bin/deskpane" "${once_args[@]}" || rc=$?
+  fi
+  case "$rc" in
+    0) ;;
+    10)
+      # the client printed which machine has the id
+      echo "get.sh: error: pick a free id and run get.sh again with --device-id <name>." >&2
+      echo "  /usr/local/bin/deskpane is installed; the reporter settings and service were not changed." >&2
+      exit 1
+      ;;
+    12)
+      # installing a client before the Pi is up is normal: keep going
+      echo "get.sh: warning: could not confirm the Pi got the report. Installing the service anyway; it keeps trying." >&2
+      ;;
+    *)
+      echo "get.sh: error: the client stopped with exit code $rc (see the line above)." >&2
+      echo "  /usr/local/bin/deskpane is installed; the reporter settings and service were not changed." >&2
+      exit 1
+      ;;
+  esac
 
   # settings file, root-only, read by systemd
   install -d -m 0755 "$DESTDIR/etc/deskpane"
@@ -408,9 +462,14 @@ WantedBy=multi-user.target
 EOF
   chmod 0644 "$DESTDIR/etc/systemd/system/deskpane-reporter.service"
   systemctl daemon-reload
+
   systemctl enable deskpane-reporter.service
   systemctl restart deskpane-reporter.service
-  say "reporting to $daemon_addr as '$device_id' ($label), at every boot"
+  if [[ -n "$device_id" ]]; then
+    say "reporting to $daemon_addr as '$device_id', at every boot"
+  else
+    say "reporting to $daemon_addr with an automatic id, at every boot"
+  fi
   echo "Settings: /etc/deskpane/reporter.env, then: sudo systemctl restart deskpane-reporter"
 }
 

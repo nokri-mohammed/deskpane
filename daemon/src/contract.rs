@@ -1,6 +1,8 @@
 //! The JSON shape every reporting device sends, and the shape the daemon
 //! relays to the dashboard. See docs/CONTRACT.md for the full spec.
 
+use std::net::IpAddr;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +28,89 @@ pub struct DeviceStatus {
     pub online: bool,
 }
 
+/// What arrives over UDP: a report plus optional request flags. `Report`
+/// itself stays unchanged, so the dashboard's shape does not move.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportPacket {
+    #[serde(flatten)]
+    pub report: Report,
+    // true asks the daemon to answer with an ack reply (deskpane report --once)
+    #[serde(default)]
+    pub ack: bool,
+}
+
+/// The one reply the daemon may send back to a reporter. Absent fields are
+/// left out of the JSON; unknown fields are ignored when parsing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Reply {
+    pub v: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_ip: Option<String>,
+}
+
+// reply format version; a client ignores a reply with another one
+pub const REPLY_VERSION: u32 = 1;
+// the only error code in reply version 1
+pub const ERROR_ID_IN_USE: &str = "id_in_use";
+// a reply is never bigger than this, and always smaller than the report that caused it
+pub const MAX_REPLY_BYTES: usize = 192;
+
+impl Reply {
+    // "this id belongs to another machine that is still online"
+    pub fn id_in_use(device_id: &str, owner: IpAddr) -> Self {
+        Reply {
+            v: REPLY_VERSION,
+            error: Some(ERROR_ID_IN_USE.to_string()),
+            ok: None,
+            device_id: device_id.to_string(),
+            owner_ip: Some(owner.to_string()),
+        }
+    }
+
+    // "your report was stored", only sent when the report asked for it
+    pub fn ack(device_id: &str) -> Self {
+        Reply {
+            v: REPLY_VERSION,
+            error: None,
+            ok: Some(true),
+            device_id: device_id.to_string(),
+            owner_ip: None,
+        }
+    }
+}
+
+/*
+ * serializes a reply, but only if it is safe to send: at most
+ * MAX_REPLY_BYTES and smaller than the request, so the daemon can never
+ * amplify traffic
+ *
+ * reply: the reply to send
+ * request_bytes: size of the report packet that caused it
+ * returns: the bytes to send, or None to send nothing
+ */
+pub fn build_reply(reply: &Reply, request_bytes: usize) -> Option<Vec<u8>> {
+    let serialized = serde_json::to_vec(reply);
+    let bytes = match serialized {
+        Ok(b) => b,
+        Err(_) => return None,
+    };
+
+    if bytes.len() > MAX_REPLY_BYTES {
+        return None;
+    }
+    if bytes.len() >= request_bytes {
+        return None;
+    }
+
+    Some(bytes)
+}
+
 // limits a report must respect before the daemon stores it (see docs/CONTRACT.md)
 pub const MAX_NAME_BYTES: usize = 64;
 pub const MAX_IP_BYTES: usize = 45;
@@ -44,8 +129,8 @@ pub const USED_OVER_TOTAL_TOLERANCE: f64 = 1.01;
  *          so it is safe to log; numbers are included
  */
 pub fn validate(report: &Report) -> Result<(), String> {
-    // text fields: length in bytes, empty or not, no control characters
-    let device_id_checked = check_text("device_id", &report.device_id, MAX_NAME_BYTES, false);
+    // device_id: the strict id rule; other text fields: length, empty or not, no control characters
+    let device_id_checked = check_device_id(&report.device_id);
     match device_id_checked {
         Ok(()) => {}
         Err(reason) => return Err(reason),
@@ -112,6 +197,51 @@ pub fn validate(report: &Report) -> Result<(), String> {
     match uptime_checked {
         Ok(()) => {}
         Err(reason) => return Err(reason),
+    }
+
+    Ok(())
+}
+
+/*
+ * checks a device id against ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$, so ids are
+ * safe in logs, unit files, shell lines and replies
+ *
+ * device_id: the id to check
+ * returns: Ok(()) or Err with a reason starting "device_id:"; the reason never
+ *          repeats the value
+ */
+pub fn check_device_id(device_id: &str) -> Result<(), String> {
+    if device_id.is_empty() {
+        return Err("device_id: must not be empty".to_string());
+    }
+
+    let length = device_id.len();
+    if length > MAX_NAME_BYTES {
+        return Err(format!(
+            "device_id: {length} bytes, longer than the limit of {MAX_NAME_BYTES}"
+        ));
+    }
+
+    // the first character must be a letter or digit, so it never reads as a flag
+    let bytes = device_id.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() {
+        return Err("device_id: must start with a letter or digit".to_string());
+    }
+
+    // the rest: ASCII letters, digits, dot, dash, underscore
+    for b in bytes {
+        let allowed;
+        if b.is_ascii_alphanumeric() || *b == b'.' || *b == b'-' || *b == b'_' {
+            allowed = true;
+        } else {
+            allowed = false;
+        }
+
+        if !allowed {
+            return Err(
+                "device_id: only letters, digits, dot, dash and underscore are allowed".to_string(),
+            );
+        }
     }
 
     Ok(())
@@ -559,6 +689,221 @@ mod tests {
         let mut report = valid_report();
         report.uptime_s = -1.0;
         assert_rejected(&report, "uptime_s");
+    }
+
+    // ---- device_id rule (T-032): ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ----
+
+    #[test]
+    fn device_id_starting_with_dash_is_rejected() {
+        let mut report = valid_report();
+        report.device_id = "-rm".to_string();
+        assert_rejected(&report, "device_id");
+    }
+
+    #[test]
+    fn device_id_starting_with_dot_is_rejected() {
+        let mut report = valid_report();
+        report.device_id = ".hidden".to_string();
+        assert_rejected(&report, "device_id");
+    }
+
+    #[test]
+    fn device_id_with_space_is_rejected() {
+        let mut report = valid_report();
+        report.device_id = "my pc".to_string();
+        assert_rejected(&report, "device_id");
+    }
+
+    #[test]
+    fn device_id_with_non_ascii_is_rejected() {
+        let mut report = valid_report();
+        report.device_id = "küche".to_string();
+        assert_rejected(&report, "device_id");
+    }
+
+    #[test]
+    fn device_id_with_slash_or_quote_is_rejected() {
+        let mut report = valid_report();
+        report.device_id = "a/b".to_string();
+        assert_rejected(&report, "device_id");
+        report.device_id = "a\"b".to_string();
+        assert_rejected(&report, "device_id");
+    }
+
+    #[test]
+    fn device_id_with_dot_dash_underscore_passes() {
+        let mut report = valid_report();
+        report.device_id = "My_PC-2.lan".to_string();
+        assert_accepted(&report);
+    }
+
+    #[test]
+    fn single_character_device_id_passes() {
+        let mut report = valid_report();
+        report.device_id = "7".to_string();
+        assert_accepted(&report);
+    }
+
+    #[test]
+    fn auto_style_device_id_passes() {
+        let mut report = valid_report();
+        report.device_id = "dp-3f9a0c41".to_string();
+        assert_accepted(&report);
+    }
+
+    #[test]
+    fn device_id_reason_does_not_echo_the_value() {
+        let mut report = valid_report();
+        report.device_id = "evil id".to_string();
+        let checked = validate(&report);
+        match checked {
+            Ok(()) => panic!("expected device_id to be rejected"),
+            Err(reason) => assert!(!reason.contains("evil")),
+        }
+    }
+
+    #[test]
+    fn check_device_id_accepts_and_rejects_directly() {
+        assert!(check_device_id("pi-zero").is_ok());
+        assert!(check_device_id("").is_err());
+        assert!(check_device_id(&"a".repeat(65)).is_err());
+    }
+
+    // ---- report packet and reply (T-033) ----
+
+    // the smallest valid report, as the contract measures it, with the given id
+    fn smallest_report(device_id: &str) -> Report {
+        Report {
+            device_id: device_id.to_string(),
+            label: "a".to_string(),
+            hostname: String::new(),
+            ip: String::new(),
+            cpu_pct: 0.0,
+            mem_used_mb: 0.0,
+            mem_total_mb: 0.0,
+            disk_used_gb: 0.0,
+            disk_total_gb: 0.0,
+            temp_c: 0.0,
+            uptime_s: 0.0,
+        }
+    }
+
+    // the longest IP text Rust prints (IPv6, every group 4 digits)
+    fn longest_ip() -> std::net::IpAddr {
+        "1111:2222:3333:4444:5555:6666:7777:8888".parse().unwrap()
+    }
+
+    #[test]
+    fn id_in_use_reply_has_version_error_id_and_owner() {
+        let owner: std::net::IpAddr = "192.168.1.60".parse().unwrap();
+        let reply = Reply::id_in_use("dev-server", owner);
+
+        let bytes = build_reply(&reply, 1000).unwrap();
+
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            r#"{"v":1,"error":"id_in_use","device_id":"dev-server","owner_ip":"192.168.1.60"}"#
+        );
+    }
+
+    #[test]
+    fn ack_reply_has_version_ok_and_id() {
+        let reply = Reply::ack("dp-3f9a0c41");
+
+        let bytes = build_reply(&reply, 1000).unwrap();
+
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            r#"{"v":1,"ok":true,"device_id":"dp-3f9a0c41"}"#
+        );
+    }
+
+    #[test]
+    fn reply_is_never_larger_than_the_request() {
+        // worst case: a 64-byte id, the longest IP, against the smallest valid report
+        let device_id = "a".repeat(64);
+        let packet = ReportPacket {
+            report: smallest_report(&device_id),
+            ack: false,
+        };
+        let request = serde_json::to_vec(&packet).unwrap();
+        let reply = Reply::id_in_use(&device_id, longest_ip());
+
+        let bytes = build_reply(&reply, request.len()).unwrap();
+
+        assert!(bytes.len() < request.len());
+        assert!(bytes.len() <= MAX_REPLY_BYTES);
+    }
+
+    #[test]
+    fn reply_not_smaller_than_the_request_is_not_built() {
+        let reply = Reply::ack("dp-3f9a0c41");
+        let size = build_reply(&reply, 1000).unwrap().len();
+
+        assert!(build_reply(&reply, size).is_none());
+        assert!(build_reply(&reply, size + 1).is_some());
+        assert!(build_reply(&reply, 0).is_none());
+    }
+
+    #[test]
+    fn reply_over_max_bytes_is_not_built() {
+        // an id far past the contract limit makes the reply too big to send
+        let reply = Reply::ack(&"a".repeat(200));
+        assert!(build_reply(&reply, 10_000).is_none());
+    }
+
+    #[test]
+    fn packet_without_ack_parses_with_ack_false() {
+        let report = smallest_report("my-pc");
+        let json = serde_json::to_string(&report).unwrap();
+
+        let packet: ReportPacket = serde_json::from_str(&json).unwrap();
+
+        assert!(!packet.ack);
+        assert_eq!(packet.report.device_id, "my-pc");
+    }
+
+    #[test]
+    fn packet_with_ack_true_parses() {
+        let json = r#"{"device_id":"my-pc","label":"a","hostname":"","ip":"","cpu_pct":0,"mem_used_mb":0,"mem_total_mb":0,"disk_used_gb":0,"disk_total_gb":0,"temp_c":0,"uptime_s":0,"ack":true}"#;
+
+        let packet: ReportPacket = serde_json::from_str(json).unwrap();
+
+        assert!(packet.ack);
+        assert_eq!(packet.report.label, "a");
+    }
+
+    #[test]
+    fn packet_missing_a_report_field_is_refused() {
+        let json = r#"{"device_id":"my-pc","ack":true}"#;
+        let parsed = serde_json::from_str::<ReportPacket>(json);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn report_without_ack_still_parses_as_report() {
+        // a packet with ack still parses as a plain Report, so old daemons keep working
+        let packet = ReportPacket {
+            report: smallest_report("my-pc"),
+            ack: true,
+        };
+        let json = serde_json::to_string(&packet).unwrap();
+
+        let report: Report = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(report.device_id, "my-pc");
+    }
+
+    #[test]
+    fn reply_parses_back_and_ignores_unknown_fields() {
+        let json = r#"{"v":2,"error":"something_new","device_id":"x","extra":5}"#;
+
+        let reply: Reply = serde_json::from_str(json).unwrap();
+
+        assert_eq!(reply.v, 2);
+        assert_eq!(reply.error, Some("something_new".to_string()));
+        assert_eq!(reply.ok, None);
+        assert_eq!(reply.owner_ip, None);
     }
 
     #[test]

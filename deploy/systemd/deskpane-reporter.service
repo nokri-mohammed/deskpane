@@ -9,9 +9,9 @@ Wants=network-online.target
 Type=simple
 User=deskpane
 Group=deskpane
-# DEVICE_ID and LABEL come from here
+# DEVICE_ID and LABEL come from here; empty means automatic id and hostname label
 EnvironmentFile=/etc/deskpane/env
-# ${VAR} (with braces) stays one argument, so a label with spaces works
+# ${VAR} (with braces) stays one argument, so a label with spaces works, and empty stays ""
 ExecStart=/opt/deskpane/current/bin/deskpane report --daemon 127.0.0.1:8765 --device-id ${DEVICE_ID} --label ${LABEL} --interval 2
 Restart=always
 RestartSec=2

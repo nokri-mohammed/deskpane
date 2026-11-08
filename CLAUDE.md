@@ -13,10 +13,13 @@ reporter (each device) --UDP JSON--> daemon (Pi) --Unix socket, one JSON line/se
 ```
 
 - `reporter/` (Rust, blocking): reads stats with `sysinfo`, sends one `Report` per packet every
-  `--interval` seconds.
+  `--interval` seconds (or once with `--once`). The default device id is `dp-` plus 8 hex chars
+  of SHA-256 over the machine id; the default label is the hostname.
 - `daemon/` (Rust, tokio): validates each report, keeps the latest report per device in memory
-  (at most 32 devices), marks a device offline after 15 s of silence, forgets it after 5 minutes
-  of silence, broadcasts a `Vec<DeviceStatus>` every second to Unix socket clients.
+  (at most 32 devices), owned by the source IP while online (a second IP gets a rate-limited
+  `id_in_use` reply), marks a device offline after 15 s of silence, forgets it after 5 minutes
+  of silence, broadcasts a `Vec<DeviceStatus>` every second to Unix socket clients. Exits 11
+  when UDP 8765 is taken.
 - `pi/` (Python, pygame): draws to the framebuffer (`/dev/fb1`, no X11), tap to change page.
 - `docs/CONTRACT.md` is the JSON wire shape and its limits. `daemon/src/contract.rs` holds the
   Rust types, `validate` and the limit constants.
@@ -26,22 +29,34 @@ reporter (each device) --UDP JSON--> daemon (Pi) --Unix socket, one JSON line/se
 ```
 daemon/src/
   lib.rs              pub mod contract; pub mod device_table; pub mod services;
-  contract.rs         Report, DeviceStatus, validate, limit constants (MAX_NAME_BYTES, ...)
-  device_table.rs     DeviceTable, pure insert_report (cap) and forget_silent (expiry)
-  main.rs             project logic: udp_server, forget_silent_devices, broadcast_statuses,
-                      unix_socket_relay, main; OFFLINE_AFTER, FORGET_AFTER, MAX_DEVICES
+  contract.rs         Report, ReportPacket (+ ack), Reply, build_reply, validate,
+                      check_device_id, limit constants (MAX_NAME_BYTES, MAX_REPLY_BYTES, ...)
+  device_table.rs     DeviceTable of DeviceEntry, pure insert_report (cap, IP ownership ->
+                      InsertOutcome) and forget_silent (expiry)
+  main.rs             project logic: bind_error_message, store_report, udp_server (replies),
+                      forget_silent_devices, broadcast_statuses, unix_socket_relay, main;
+                      OFFLINE_AFTER, FORGET_AFTER, MAX_DEVICES, REPLY_EVERY, EXIT_PORT_IN_USE
   services/
     broadcaster.rs    tokio broadcast channel that sends JSON
-    udp.rs            UdpSocketServer (async, daemon) + UdpClient (blocking, reporter)
+    reply_limiter.rs  ReplyLimiter: per-source and per-second reply limits, capped memory
+    udp.rs            UdpSocketServer (async, daemon: try_new, receive, send_to) +
+                      UdpClient (blocking, reporter: send, try_receive -> Received)
     unix_socket.rs    UnixSocketServer + Subscriber, #[cfg(unix)] only
 reporter/src/
-  main.rs             clap CLI, build_report, send_report, run
+  main.rs             clap CLI, resolve_identity, read_reply, review_replies, build_report,
+                      run (back-off loop), report_once; exit codes EXIT_USAGE 2, and for
+                      --once only EXIT_ID_IN_USE 10, EXIT_NO_ANSWER 12
   services/
+    conflict.rs       ConflictTracker: warn once, back off 300 s when a conflict outlasts the
+                      grace window (run mode never exits on a conflict)
+    machine_id.rs     read_machine_id per OS + pure parse_* and derive_device_id (sha2)
     system_stats.rs   SystemStats (sysinfo wrapper) + pure pick_disk_gb / pick_cpu_temp
 pi/
   dashboard.py        reads the socket, draws an overview page, then one device per page
+  layout.py           pure helpers, no pygame: read_version, overview_layout, version_position
   fb_display.py       framebuffer drawing
   touch.py            evdev tap watcher
+  tests/test_layout.py  stdlib unittest for layout.py
 deploy/
   systemd/*.service   the four units the Pi bundle installs (static, user deskpane)
   install.sh          installs or upgrades the Pi bundle (runs as root on the Pi)
@@ -75,19 +90,22 @@ Use `~/.cargo/bin/cargo`. `/usr/bin/cargo` is 1.75 and too old for this workspac
 `toolchain:` inputs in `.github/workflows/`.
 
 ```bash
-~/.cargo/bin/cargo test --workspace                                   # 94 tests: daemon 76, reporter 18
+~/.cargo/bin/cargo test --workspace                                   # 221 tests: daemon 142, reporter 79
+python3 -m unittest discover -s pi/tests                             # 18 tests: pi/layout.py (CI runs it too)
 ~/.cargo/bin/cargo build --release --locked --target aarch64-unknown-linux-musl # Pi build, static (linker in .cargo/config.toml)
 scripts/package-pi-bundle.sh                                          # Pi bundle from that build, into dist/
 scripts/provision-pi.sh pi-zero                                       # bundle + install.sh on a Pi over SSH
 ~/.cargo/bin/cargo fmt --all --check                                  # CI runs these two as well
 ~/.cargo/bin/cargo clippy --workspace --all-targets --locked -- -D warnings
 SOCKET_PATH=/tmp/deskpane.sock ~/.cargo/bin/cargo run -p daemon      # LISTEN_ADDR, SOCKET_PATH (default /run/deskpane/daemon.sock), PROTOCOL
-~/.cargo/bin/cargo run -p reporter -- report --daemon 127.0.0.1:8765 --device-id dev --label Dev
+~/.cargo/bin/cargo run -p reporter -- report --daemon 127.0.0.1:8765   # automatic id and label; --device-id, --label, --once
 ```
 
-The Windows target (`x86_64-pc-windows-gnu`) is not installed on this machine. CI and the release
-workflow build it. `.github/workflows/release.yml` runs on every push to `main`: release-please
-keeps a release PR open, and merging it tags `vX.Y.Z`, creates a draft release, builds the
+The Windows target (`x86_64-pc-windows-gnu`) builds in CI (`windows-check` job: clippy) and in the
+release workflow. Locally: `rustup target add x86_64-pc-windows-gnu`, then
+`~/.cargo/bin/cargo clippy --locked --target x86_64-pc-windows-gnu -p reporter --all-targets -- -D warnings`.
+
+`.github/workflows/release.yml` runs on every push to `main`: release-please keeps a release PR open, and merging it tags `vX.Y.Z`, creates a draft release, builds the
 downloads and publishes the release with `SHA256SUMS`. Plan: `docs/plans/2026-11-07-release-artifacts.md`.
 
 ## Code style
@@ -131,8 +149,9 @@ Executives on this project (hub plugins `architecture`, `tdd`, `review`, `patter
 - **tdd-guide**: run `~/.cargo/bin/cargo test --workspace`. Tests are a `#[cfg(test)] mod tests`
   at the bottom of each service file, `#[tokio::test]` for async code, `#[should_panic(expected
   = "...")]` for setup failures. Socket tests use short `/tmp/phd-test-{pid}-{name}.sock` paths
-  and delete them. Pure logic takes plain data so tests feed fake readings. `pi/` has no tests
-  yet.
+  and delete them. Pure logic takes plain data so tests feed fake readings (times are passed
+  in as `Instant`s). `pi/` tests are stdlib `unittest` in `pi/tests/`, for pure code only (no
+  pygame): `python3 -m unittest discover -s pi/tests`.
 - **code-reviewer**: review Rust against `rust-patterns` (no shorthand, comments above, generic
   code in `services/`, project logic in `main.rs`). Check new services have edge-case tests.
 - **security-reviewer**: untrusted input enters in one place: UDP packets on `0.0.0.0:8765`,
@@ -155,7 +174,7 @@ The live list is `docs/backlog.md`. Do not copy items here.
 Done: the two HIGH security findings (T-002 report validation, commit 6c29acc; T-003 device table
 cap and expiry, commit 7fd7b50) and the private-data scrub with history rewritten (T-004).
 
-Not built yet: a one-shot report, `deskpane install` (systemd / Windows Service),
-TCP+mTLS transport.
+Not built yet: `deskpane install` (systemd / Windows Service), TCP+mTLS transport, UDP
+authentication (T-006, scheduled for v0.2.0).
 
 v0.1.0-beta.1 was installed and run on the real Pi Zero 2 W and touchscreen on 2026-11-07.

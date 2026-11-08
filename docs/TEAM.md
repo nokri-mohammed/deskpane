@@ -79,3 +79,9 @@ flowchart TD
 | 2026-11-07 | architect | T-028: one-line installer get.sh (newest release incl. betas, hash check, old-install removal, port check, auto reboot, --reporter-only), same checks in install.sh, INSTALL.md quick install |
 | 2026-11-07 | security-specialist | Reviewed T-028 get.sh: caution, no must-fix, 6 cheap fixes (env hygiene, Pi --reporter-only guard, TLS error message, client unit hardening, reboot wording, leftover-files line); deferred T-030, T-031 |
 | 2026-11-07 | architect | T-028 security fixes: env hygiene (DESKPANE_DESTDIR, curl -q, fixed tmp dir), Pi guard for --reporter-only, clearer network error, client unit hardening (1.7 OK), INSTALL.md wording, RECOVERY.md note |
+| 2026-11-07 | architect | beta.3 design (docs/plans/2026-11-07-beta3-ids-and-screen.md): automatic ids, duplicate rejection with replies, port-in-use exit, screen changes |
+| 2026-11-07 | tdd-guide | beta.3 build test first: T-027 port-in-use exit, T-032 automatic ids, T-033 duplicate rejection with replies and --once, installers, T-034 screen (198 Rust + 18 Python tests) |
+| 2026-11-07 | code-reviewer | Reviewed beta.3: approve with follow-ups (get.sh re-run order, keep ids on client upgrade, Windows ConnectionReset, CI Windows check, --once message) |
+| 2026-11-07 | security-reviewer | Reviewed beta.3 replies: caution, no amplification or limiter flush; must-fix SECURITY.md; fixes: back-off instead of permanent stop, limiter const test, bounded drain, absolute reg.exe path |
+| 2026-11-07 | doc-updater | beta.3 SECURITY.md: daemon replies and their limits, device ids, reply spoofing and squatting until v0.2.0, exit codes |
+| 2026-11-07 | tdd-guide | beta.3 review fixes: reporter backs off 5 min instead of stopping, get.sh check before writing and keeps saved ids, Windows CI check, bounded reply reads, absolute reg.exe path (221 Rust + 18 Python tests) |

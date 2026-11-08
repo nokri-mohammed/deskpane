@@ -205,14 +205,19 @@ These are all the options `install.sh` accepts. Run `./install.sh --help` to see
 |---|---|
 | `--no-display` | Install without the touchscreen. No display driver, no boot changes, no dashboard. |
 | `--no-reporter` | Do not show the Pi's own stats on the dashboard. |
-| `--device-id ID` | The id of the Pi's own entry. Use 1 to 64 letters, digits, dots, dashes or underscores. First install only. |
-| `--label TEXT` | The name shown for the Pi on the dashboard. Use up to 64 letters, digits, spaces and `. _ ( ) -`. First install only. |
+| `--device-id ID` | The id of the Pi's own entry. Use 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit. First install only. Default: automatic (see below). |
+| `--label TEXT` | The name shown for the Pi on the dashboard. Use up to 64 letters, digits, spaces and `. _ ( ) -`. First install only. Default: the hostname. |
 | `--overlay-file FILE` | Use a display driver file that you already downloaded. The installer still checks its hash. |
 | `--no-summary` | Do not print the summary at the end. The one-line install uses this and prints its own. |
 | `-h`, `--help` | Show the help. |
 
-If you do not give `--device-id` or `--label`, the Pi shows up as `pi-zero` with the label
-`Raspberry Pi`.
+If you do not give `--device-id`, the Pi gets an automatic id made from its machine id, for
+example `dp-3f9a0c41`. It stays the same across restarts and upgrades. Without `--label`, the
+label is the hostname. Pis installed before 0.1.0-beta.3 keep their old settings (`pi-zero`).
+
+At the end, the installer sends one test report as the Pi and prints the id it reports as. If a
+computer on your network already uses that id, it prints an error and the fix, and the install
+still finishes.
 
 ### What the installer does
 
@@ -236,7 +241,8 @@ You do not need to do any of this by hand. The list is here so you know what cha
 10. It adds `fbcon=map:1` to `/boot/firmware/cmdline.txt`. This keeps the text console off the
    touchscreen.
 11. Before its first change to a boot file, it saves a copy as `<file>.deskpane.bak`.
-12. It installs, turns on and starts the systemd services.
+12. It installs, turns on and starts the systemd services, then sends one test report as the
+    Pi (`deskpane report --once`) and prints the id it reports as.
 13. It keeps the current and the previous version in `/opt/deskpane/releases/`, and
     deletes older ones.
 
@@ -290,20 +296,24 @@ The services that run depend on the installer options:
 Each computer that you want on the dashboard runs the `deskpane` program. The reporter sends
 one small message to the Pi every few seconds.
 
-Each computer needs its own device id. If two computers use the same id, they overwrite each
-other on the dashboard.
+Each computer needs its own device id. By default `deskpane` makes one from the computer's
+machine id, for example `dp-3f9a0c41`, so you do not have to pick one. If two computers still
+end up with the same id, the Pi keeps the first one and refuses the second. The second computer
+prints an error that names the first one's IP address. If the clash goes on, it pauses for 5
+minutes at a time and then tries again, until you fix the id.
 
 The `deskpane` program has one command, `report`, with these options:
 
 | Option | What it is |
 |---|---|
 | `--daemon ADDRESS` | The Pi's IP address and port, for example `192.168.1.50:8765`. Required. |
-| `--device-id ID` | A fixed, unique id for this computer, for example `my-pc`. Required. |
-| `--label TEXT` | The name shown on the dashboard, for example `"My PC"`. Required. |
+| `--device-id ID` | A fixed, unique id for this computer, for example `my-pc`: 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or digit. Optional; the default is made from the machine id. |
+| `--label TEXT` | The name shown on the dashboard, for example `"My PC"`. Optional; the default is the hostname. |
 | `--interval SECONDS` | Seconds between two reports. The default is 4. |
+| `--once` | Send one report, wait up to 3 seconds for the Pi's answer, and exit: 0 when the Pi stored it, 10 when the id is in use, 12 when there is no answer. Good for checking a setup. |
 
-The daemon drops a report if the id or the label is empty or longer than 64 bytes. Keep them
-short.
+The daemon drops a report if the label is empty or longer than 64 bytes, or if the id breaks
+the rule above. Keep them short.
 
 ### Linux
 
@@ -316,9 +326,14 @@ service that reports to the Pi at every start (use your Pi's IP address):
 curl -fsSL https://raw.githubusercontent.com/nokri-mohammed/deskpane/main/get.sh | sudo bash -s -- --reporter-only --daemon 192.168.1.50:8765
 ```
 
-The device id is the computer's short hostname, and the label is the same. Add
-`--device-id my-pc --label "My PC"` to choose your own. The settings are in
-`/etc/deskpane/reporter.env`. Without `--daemon`, the line only installs the program.
+The device id is automatic (made from the machine id) and the label is the hostname. Add
+`--device-id my-pc --label "My PC"` to choose your own. Before it turns the service on, the
+line sends one test report (`deskpane report --once`). If the Pi says the id is in use, it stops
+before it changes the settings or the service, and tells you to pick another one with
+`--device-id`. If the Pi does not answer (it is off, or runs a version older than
+0.1.0-beta.3), it warns and installs anyway. Running the line again keeps the id and label in
+`/etc/deskpane/reporter.env` unless you pass new ones. Without `--daemon`, the line only
+installs the program.
 
 The manual way:
 
@@ -367,11 +382,12 @@ The manual way:
 7. Start it. Use your Pi's IP address:
 
    ```bash
-   deskpane report --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"
+   deskpane report --daemon 192.168.1.50:8765
    ```
 
-   It prints `reporter: pushing to 192.168.1.50:8765 as 'my-pc' every 4s`. Your computer shows
-   up on the dashboard within a few seconds.
+   It prints `deskpane: reporting to 192.168.1.50:8765 as dp-3f9a0c41 (automatic id, label "my-pc") every 4s`.
+   Your computer shows up on the dashboard within a few seconds. Add
+   `--device-id my-pc --label "My PC"` to choose the id and the name yourself.
 
 8. Press `Ctrl+C` to stop it.
 
@@ -392,7 +408,7 @@ The one-line install with `--daemon` (above) sets this up for you. To add a syst
    Type=simple
    # a throwaway user with no rights; the reporter only reads system stats
    DynamicUser=yes
-   ExecStart=/usr/local/bin/deskpane report --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"
+   ExecStart=/usr/local/bin/deskpane report --daemon 192.168.1.50:8765
    Restart=always
    RestartSec=5
 
@@ -439,7 +455,7 @@ The one-line install with `--daemon` (above) sets this up for you. To add a syst
 7. Start the reporter. Use your Pi's IP address:
 
    ```powershell
-   .\deskpane.exe report --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"
+   .\deskpane.exe report --daemon 192.168.1.50:8765
    ```
 
 8. Keep the window open. The reporter stops when you close it.
@@ -457,7 +473,7 @@ To start the reporter when you log in, use Task Scheduler:
 3. Set the trigger to **When I log on**.
 4. Set the action to **Start a program**.
 5. In **Program/script**, select `deskpane.exe`.
-6. In **Add arguments**, type `report --daemon 192.168.1.50:8765 --device-id my-pc --label "My PC"`.
+6. In **Add arguments**, type `report --daemon 192.168.1.50:8765`.
 7. Finish the task.
 
 A reporter that runs as a Windows service is planned for a later version.
@@ -469,8 +485,8 @@ file.
 
 | Setting | What it does | Default |
 |---|---|---|
-| `DEVICE_ID` | The id of the Pi's own entry. | `pi-zero` |
-| `LABEL` | The name shown for the Pi. | `Raspberry Pi` |
+| `DEVICE_ID` | The id of the Pi's own entry. Empty means automatic. | empty (automatic, `pi-zero` on Pis installed before 0.1.0-beta.3) |
+| `LABEL` | The name shown for the Pi. Empty means the hostname. | empty (hostname) |
 | `LISTEN_ADDR` | The address and port where the daemon receives reports. | `0.0.0.0:8765` |
 
 1. Open the file:
@@ -679,8 +695,11 @@ journalctl -u deskpane-daemon -b --no-pager
 ### A computer does not show on the dashboard
 
 1. Check the reporter's output on that computer. It must print
-   `reporter: pushing to 192.168.1.50:8765 ...`. `udp: send failed` means the computer cannot
-   send to that address.
+   `deskpane: reporting to 192.168.1.50:8765 ...`. `udp: send failed` means the computer cannot
+   send to that address. Run `deskpane report --once --daemon 192.168.1.50:8765` for a quick
+   check: it prints `deskpane: reported to ...` when the Pi stored the report. `no answer`
+   right after another check from the same computer is the Pi's limit of one answer per 10
+   seconds: wait 10 seconds and run it again.
 2. Check the IP address in `--daemon`. It must be the Pi's address, with `:8765` at the end.
 3. Check the firewalls. The reporter sends UDP packets to port 8765 on the Pi. Raspberry Pi OS
    Lite has no firewall by default. If you turned one on (for example `ufw`), allow UDP port
@@ -703,6 +722,7 @@ journalctl -u deskpane-daemon -b --no-pager
    | `daemon: bad report from <address>: ...` | The packet was not a valid report. Check that the reporter and the Pi run the same version. |
    | `daemon: rejected report from <address>: <reason>` | The report broke a limit, for example a label longer than 64 bytes. The reason names the field. See [CONTRACT.md](CONTRACT.md) for the limits. |
    | `daemon: device table full, dropping report from <address>` | The daemon already holds 32 devices. It drops new devices until a slot is free. |
+   | `daemon: refused device id <id> from <address>: in use by <owner>` | Another computer already uses that id. See the next section. |
    | `daemon: forgot <id> after 300 s of silence` | That device sent nothing for 5 minutes, so the daemon removed it. |
 
    If no line shows up for your computer, the packets do not reach the Pi. Check the network
@@ -710,6 +730,50 @@ journalctl -u deskpane-daemon -b --no-pager
 
 A device that stops sending shows as offline after 15 seconds. The daemon removes it after 5
 minutes. That frees its slot in the table of 32 devices.
+
+### "device id ... is already used by ..."
+
+The reporter prints:
+
+```
+deskpane: error: device id "my-pc" is already used by 192.168.1.60. Pick another one: --device-id <name>
+```
+
+If the clash lasts more than about 16 seconds, it prints the line below, sends nothing for 5
+minutes, then tries again. It keeps doing that, one line per pause, until the clash is gone:
+
+```
+deskpane: error: device id "my-pc" is still used by 192.168.1.60. Pausing reports for 300 s, then trying again. Pick another one: --device-id <name>
+```
+
+Two computers report with the same id. The Pi keeps the one that reported first (at
+192.168.1.60) and refuses the other. Give this computer its own id with `--device-id`, or in
+`/etc/deskpane/reporter.env` (`DEVICE_ID=`), then restart it:
+`sudo systemctl restart deskpane-reporter`. `(the Pi itself)` after the address means the Pi's
+own reporter uses that id.
+
+Automatic ids only clash when two machines share a machine id, for example a VM or an SD card
+cloned after its first start. Either pass `--device-id <name>`, or give the clone a new machine
+id: `sudo rm /etc/machine-id && sudo systemd-machine-id-setup`, then reboot.
+
+`no machine id found ... Pass a name: --device-id <name>` (exit code 2) means the system has no
+usable machine id. Pass `--device-id <name>`.
+
+| Exit code | Program | Meaning |
+|---|---|---|
+| 2 | `deskpane` | Wrong options, or no machine id. |
+| 10 | `deskpane --once` | The device id is in use by another computer. (The running reporter never exits for this; it pauses and retries.) |
+| 12 | `deskpane --once` | No answer from the Pi: it is off, a firewall blocks UDP 8765, it runs a version older than 0.1.0-beta.3, or this computer already ran a check (or got a reply) in the last 10 seconds. The Pi answers each computer at most once per 10 seconds, so wait 10 seconds and try again. |
+| 11 | `deskpane-daemon` | UDP port 8765 is in use by another program. systemd does not restart it. |
+
+### The daemon stops with "UDP port 8765 is already in use"
+
+```
+deskpane-daemon: error: UDP port 8765 is already in use by another program. Find it with: sudo ss -ulpn 'sport = :8765'
+```
+
+Run that `ss` command to see which program holds the port, stop it, then start the daemon again:
+`sudo systemctl restart deskpane-daemon`.
 
 ### The Pi's own stats do not show
 

@@ -37,7 +37,9 @@ Usage: sudo ./install.sh [options]
   --no-reporter        do not report the Pi's own stats
   --device-id ID       device id for the Pi's own reporter (first install only),
                        letters, digits, dot, dash, underscore, up to 64
+                       (default: automatic, derived from /etc/machine-id)
   --label TEXT         label shown on the dashboard (first install only), up to 64
+                       (default: the hostname)
   --overlay-file FILE  use an already downloaded display overlay (hash still checked)
   --no-summary         skip the closing summary (get.sh prints its own)
   -h, --help           show this help
@@ -170,7 +172,7 @@ if [[ "$WITH_DISPLAY" -eq 1 && ! -f "$DESTDIR$BOOT_DIR/config.txt" ]]; then
   die "$BOOT_DIR/config.txt not found: Raspberry Pi OS Bookworm or later is required (or use --no-display)"
 fi
 for f in VERSION LICENSE overlay.env config/env.example bin/deskpane-daemon bin/deskpane \
-  dashboard/dashboard.py dashboard/fb_display.py dashboard/touch.py \
+  dashboard/dashboard.py dashboard/fb_display.py dashboard/touch.py dashboard/layout.py \
   systemd/deskpane-daemon.service systemd/deskpane-dashboard.service \
   systemd/deskpane-reporter.service systemd/deskpane-unbind-fbcon.service; do
   [[ -f "$BUNDLE_DIR/$f" ]] || die "bundle is incomplete: $f is missing"
@@ -386,6 +388,46 @@ for unit in "${UNITS[@]}"; do
   systemctl restart "$unit"
 done
 
+# ask the daemon, as the Pi's own reporter, whether its id is free; it may
+# still be binding, so retry "no answer" (exit 12) for about 5 s. Never fatal.
+REPORTED_AS=""
+if [[ "$WITH_REPORTER" -eq 1 ]]; then
+  ONCE_ARGS=(report --once --daemon 127.0.0.1:8765)
+  ENV_DEVICE_ID="$(read_key DEVICE_ID "$ENV_FILE")"
+  ENV_LABEL="$(read_key LABEL "$ENV_FILE")"
+  if [[ -n "$ENV_DEVICE_ID" ]]; then
+    ONCE_ARGS+=(--device-id "$ENV_DEVICE_ID")
+  fi
+  if [[ -n "$ENV_LABEL" ]]; then
+    ONCE_ARGS+=(--label "$ENV_LABEL")
+  fi
+  say "checking the Pi's own report"
+  ONCE_RC=12
+  ONCE_DEADLINE=$((SECONDS + 5))
+  while [[ "$ONCE_RC" -eq 12 && "$SECONDS" -lt "$ONCE_DEADLINE" ]]; do
+    ONCE_RC=0
+    ONCE_OUT="$("$DESTDIR$PREFIX/current/bin/deskpane" "${ONCE_ARGS[@]}" 2>"$WORK_DIR/once.err")" || ONCE_RC=$?
+    if [[ "$ONCE_RC" -eq 12 ]]; then
+      sleep 1
+    fi
+  done
+  case "$ONCE_RC" in
+    0)
+      say "$ONCE_OUT"
+      # "deskpane: reported to 127.0.0.1:8765 as <id> (<label>)": keep the id
+      REPORTED_AS="$(echo "$ONCE_OUT" | sed -n 's/^deskpane: reported to [^ ]* as \([^ ]*\) .*/\1/p')"
+      ;;
+    10)
+      cat "$WORK_DIR/once.err" >&2
+      warn "a machine on the LAN already uses the Pi's device id. Set DEVICE_ID in $CONFIG_DIR/env, then: sudo systemctl restart deskpane-reporter"
+      ;;
+    *)
+      cat "$WORK_DIR/once.err" >&2
+      warn "could not confirm the Pi's own report (exit $ONCE_RC); check: journalctl -u deskpane-daemon -u deskpane-reporter"
+      ;;
+  esac
+fi
+
 # keep this release and the previous one (the rollback), delete older ones
 for dir in "$RELEASES"/*/; do
   name="$(basename "$dir")"
@@ -410,8 +452,11 @@ if [[ -z "$PI_IP" ]]; then
   PI_IP="<this Pi's IP>"
 fi
 echo
-echo "On every other machine, run the reporter pointed at this Pi, for example:"
-echo "  deskpane report --daemon $PI_IP:8765 --device-id my-pc --label \"My PC\""
+if [[ -n "$REPORTED_AS" ]]; then
+  echo "This Pi reports as: $REPORTED_AS"
+fi
+echo "On every other machine, run the reporter pointed at this Pi (id and label are automatic):"
+echo "  deskpane report --daemon $PI_IP:8765"
 if [[ -n "$PREVIOUS" && "$PREVIOUS" != "$VERSION" ]]; then
   echo "Rollback: sudo ln -sfn releases/$PREVIOUS $PREFIX/current && sudo systemctl restart ${UNITS[*]}"
 fi

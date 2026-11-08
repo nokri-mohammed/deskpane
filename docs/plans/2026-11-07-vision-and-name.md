@@ -247,7 +247,7 @@ What must land first:
 | Milestone | Scope | Out of scope |
 |---|---|---|
 | **v0.1.0** | stats as it is today, under the new name. The rename only (section 8). | any new feature, socket envelope, HTTP listener |
-| **v0.2.0: foundation** | socket envelope with `stats` only, dashboard view ring, token store and `token add/list/remove` (T-006), HTTP control API with TLS, read-only `GET /api/state`. Rewrite `SECURITY.md`. | tasks and canvas content |
+| **v0.2.0: foundation** | socket envelope with `stats` only, dashboard view ring, token store and `token add/list/remove` (T-006), HTTP control API with TLS, read-only `GET /api/state`. HMAC on UDP reports and replies, reusing the tokens (T-006; closes reply spoofing and id squatting from beta.3). Rewrite `SECURITY.md`. | tasks and canvas content |
 | **v0.3.0: task view** | `TaskList` with persistence and limits, `/api/tasks`, the `<name> mcp` stdio bridge with the tools in section 3, task pages on the dashboard, `focus`. | remote `/mcp` endpoint on the Pi |
 | **v0.4.0: canvas view** | `Scene` validation and persistence, `/api/canvas`, the portal on the Pi, pairing code, clear-by-long-press. | sharing beyond the owner, bitmaps |
 | later | remote Streamable HTTP `/mcp`, signed UDP reports, TCP+mTLS reporters, shared canvas with an approval queue | |
