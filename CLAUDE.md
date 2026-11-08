@@ -130,7 +130,7 @@ Use `~/.cargo/bin/cargo`. `/usr/bin/cargo` is 1.75 and too old for this workspac
 `toolchain:` inputs in `.github/workflows/`.
 
 ```bash
-~/.cargo/bin/cargo test --workspace                                   # 443 tests: daemon 238, reporter 205
+~/.cargo/bin/cargo test --workspace                                   # 447 tests: daemon 242, reporter 205
 python3 -m unittest discover -s pi/tests                             # 214 tests: layout 87, charpack 68, pack install 27, fake-root deploy 32 (CI runs it too)
 ~/.cargo/bin/cargo build --release --locked --target aarch64-unknown-linux-musl # Pi build, static (linker in .cargo/config.toml)
 scripts/package-pi-bundle.sh                                          # Pi bundle from that build, into dist/

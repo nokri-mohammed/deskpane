@@ -186,6 +186,26 @@ impl UdpClient {
 }
 
 /*
+ * Picks the address to send to from what a name resolved to. The daemon listens on IPv4
+ * (0.0.0.0), so the first IPv4 address wins even when an IPv6 address comes first. With no
+ * IPv4 address, the first address is used.
+ *
+ * addrs: every address the name resolved to, in resolver order
+ * returns: the chosen address, or None when the list is empty
+ */
+pub fn pick_address(addrs: &[SocketAddr]) -> Option<SocketAddr> {
+    for a in addrs {
+        if a.is_ipv4() {
+            return Some(*a);
+        }
+    }
+    match addrs.first() {
+        Some(a) => Some(*a),
+        None => None,
+    }
+}
+
+/*
  * sends one packet to target from a fresh non-blocking socket, and never
  * panics or prints: for short-lived callers (a Claude Code hook) that must
  * stay silent and decide themselves what to log. A host name is resolved
@@ -197,14 +217,18 @@ impl UdpClient {
  * returns: Ok(()) once the OS took the packet, or Err with the reason
  */
 pub fn send_datagram(target: &str, bytes: &[u8]) -> Result<(), String> {
-    // resolve the target, and keep the first address it gives
+    // resolve the target, then pick the address to send to
     let resolved = target.to_socket_addrs();
-    let mut addrs = match resolved {
+    let found = match resolved {
         Ok(a) => a,
         Err(e) => return Err(format!("resolve {target}: {e}")),
     };
-    let first = addrs.next();
-    let addr = match first {
+    let mut all = Vec::new();
+    for a in found {
+        all.push(a);
+    }
+    let picked = pick_address(&all);
+    let addr = match picked {
         Some(a) => a,
         None => return Err(format!("resolve {target}: no address")),
     };
@@ -576,6 +600,44 @@ mod tests {
         let mut buf = [0u8; 64];
         let (len, _) = receiver.recv_from(&mut buf).unwrap();
         assert_eq!(&buf[..len], b"{\"kind\":\"agent\"}");
+    }
+
+    // pick_address tests
+
+    #[test]
+    fn pick_address_prefers_ipv4_over_an_earlier_ipv6() {
+        let v6: std::net::SocketAddr = "[::1]:8765".parse().unwrap();
+        let v4: std::net::SocketAddr = "127.0.0.1:8765".parse().unwrap();
+
+        let picked = pick_address(&[v6, v4]);
+
+        assert_eq!(picked, Some(v4));
+    }
+
+    #[test]
+    fn pick_address_keeps_the_first_ipv4_when_there_are_several() {
+        let a: std::net::SocketAddr = "192.168.1.50:8765".parse().unwrap();
+        let b: std::net::SocketAddr = "192.168.1.51:8765".parse().unwrap();
+
+        let picked = pick_address(&[a, b]);
+
+        assert_eq!(picked, Some(a));
+    }
+
+    #[test]
+    fn pick_address_falls_back_to_ipv6_when_there_is_no_ipv4() {
+        let v6: std::net::SocketAddr = "[::1]:8765".parse().unwrap();
+
+        let picked = pick_address(&[v6]);
+
+        assert_eq!(picked, Some(v6));
+    }
+
+    #[test]
+    fn pick_address_of_nothing_is_none() {
+        let picked = pick_address(&[]);
+
+        assert_eq!(picked, None);
     }
 
     #[test]
