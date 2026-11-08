@@ -332,6 +332,381 @@ fn check_used_total(
     Ok(())
 }
 
+// ---- agent packets (Claude Code session status, docs/plans/2026-11-08-agent-status-view.md) ----
+
+// the kind word of an agent packet; a packet with no kind is a report
+pub const PACKET_KIND_AGENT: &str = "agent";
+// agent packet version; any other value is dropped
+pub const AGENT_PACKET_VERSION: u32 = 1;
+// longest project name and "doing" text, in bytes (UTF-8)
+pub const MAX_PROJECT_BYTES: usize = 32;
+pub const MAX_DOING_BYTES: usize = 32;
+// a session id on the wire is exactly this many lowercase hex characters
+pub const SID_LEN: usize = 12;
+// context used, in percent (reserved for later, not sent in the first beta)
+pub const MAX_CTX_PCT: u32 = 100;
+// a subagent key on the wire is exactly this many lowercase hex characters
+pub const SUB_LEN: usize = 8;
+// the "doing" text of a prompt (UserPromptSubmit): a new turn of the main agent
+pub const DOING_THINKING: &str = "thinking";
+
+/*
+ * true for a Unicode format character (category Cf): bidi overrides and
+ * isolates, zero-width spaces and joiners, the byte order mark, tag
+ * characters, ... They draw nothing but can reorder or hide text on screen
+ */
+pub fn is_format_char(c: char) -> bool {
+    let code = c as u32;
+    for (first, last) in FORMAT_CHAR_RANGES {
+        if code >= first && code <= last {
+            return true;
+        }
+    }
+    false
+}
+
+// every code point of Unicode category Cf, as inclusive ranges
+const FORMAT_CHAR_RANGES: [(u32, u32); 21] = [
+    (0x00AD, 0x00AD),
+    (0x0600, 0x0605),
+    (0x061C, 0x061C),
+    (0x06DD, 0x06DD),
+    (0x070F, 0x070F),
+    (0x0890, 0x0891),
+    (0x08E2, 0x08E2),
+    (0x180E, 0x180E),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x2064),
+    (0x2066, 0x206F),
+    (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0001, 0xE0001),
+    (0xE0020, 0xE007F),
+];
+
+/// Only the kind of a packet; every other field is ignored at this step.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PacketKind {
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// The state of one agent session, as the client maps hook events to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    Idle,
+    Working,
+    Done,
+    NeedsYou,
+    Error,
+    Ended,
+}
+
+impl AgentState {
+    // the word on the wire, e.g. needs_you
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentState::Idle => "idle",
+            AgentState::Working => "working",
+            AgentState::Done => "done",
+            AgentState::NeedsYou => "needs_you",
+            AgentState::Error => "error",
+            AgentState::Ended => "ended",
+        }
+    }
+}
+
+/// One agent status packet, sent by `deskpane agent` from a Claude Code hook.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentPacket {
+    pub kind: String,
+    pub v: u32,
+    pub sid: String,
+    pub device_id: String,
+    pub project: String,
+    pub state: AgentState,
+    pub doing: String,
+    // sender wall clock, milliseconds since the Unix epoch
+    pub t: u64,
+    // context used in percent; reserved, not sent in the first beta
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<u32>,
+    // which subagent sent it (8 hex, hashed agent_id); absent for the main agent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub: Option<String>,
+}
+
+/// One agent session as the daemon pushes it to the dashboard, with the
+/// fields derived at broadcast time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSession {
+    pub sid: String,
+    pub device_id: String,
+    // label of the device with the same device_id, else empty
+    pub label: String,
+    pub project: String,
+    pub state: AgentState,
+    pub doing: String,
+    // seconds since the daemon first saw the session
+    pub running_s: u64,
+    // seconds since the state last changed
+    pub state_s: u64,
+    // seconds since the daemon last heard from the session (for "no news for 12m")
+    pub silent_s: u64,
+    // working, but no packet for AGENT_QUIET_AFTER
+    pub quiet: bool,
+    // always present, null until context usage is sent (T-048)
+    pub ctx: Option<u32>,
+}
+
+// version of the socket line envelope
+pub const ENVELOPE_VERSION: u32 = 1;
+
+/// The stats view: every device, as the bare array was before the envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsView {
+    pub devices: Vec<DeviceStatus>,
+}
+
+/// The agents view: every agent session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentsView {
+    pub sessions: Vec<AgentSession>,
+}
+
+/// The views in one socket line; later views add keys here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Views {
+    pub stats: StatsView,
+    pub agents: AgentsView,
+}
+
+/// One line on the dashboard socket: {"v":1,"views":{"stats":..,"agents":..}}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    pub v: u32,
+    pub views: Views,
+}
+
+/// A packet after the kind probe: a report or an agent packet.
+#[derive(Debug, Clone)]
+pub enum ParsedPacket {
+    Report(ReportPacket),
+    Agent(AgentPacket),
+}
+
+/// Why a packet could not be parsed. Every reason is safe to log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PacketError {
+    // not a JSON object with a text kind (or no kind)
+    Malformed(String),
+    // no kind, but not a valid report either (the serde reason, as before)
+    BadReport(String),
+    // kind agent, but not the agent shape; the reason never repeats a value
+    BadAgent(String),
+    // a kind this daemon does not know; the kind itself is never repeated
+    UnknownKind,
+}
+
+/*
+ * reads one datagram: first only its kind, then the full shape for that kind
+ *
+ * bytes: the datagram as received
+ * returns: a report (no kind, as old reporters send), an agent packet
+ *          (kind "agent"), or why it was dropped. Only report errors carry
+ *          the serde reason (as before); the others never repeat a value.
+ */
+pub fn parse_packet(bytes: &[u8]) -> Result<ParsedPacket, PacketError> {
+    // the probe: only the kind, every other field is ignored at this step
+    let probed = serde_json::from_slice::<PacketKind>(bytes);
+    let probe = match probed {
+        Ok(p) => p,
+        Err(e) => {
+            let column = e.column();
+            return Err(PacketError::Malformed(format!(
+                "not a JSON object with a text kind (column {column})"
+            )));
+        }
+    };
+
+    let kind = match probe.kind {
+        Some(k) => k,
+        None => {
+            // no kind: a report, parsed exactly as before
+            let parsed = serde_json::from_slice::<ReportPacket>(bytes);
+            return match parsed {
+                Ok(p) => Ok(ParsedPacket::Report(p)),
+                Err(e) => Err(PacketError::BadReport(report_error_reason(&e))),
+            };
+        }
+    };
+
+    if kind != PACKET_KIND_AGENT {
+        return Err(PacketError::UnknownKind);
+    }
+
+    // serde messages can quote the bad value, so only the column is kept
+    let parsed = serde_json::from_slice::<AgentPacket>(bytes);
+    match parsed {
+        Ok(p) => Ok(ParsedPacket::Agent(p)),
+        Err(e) => {
+            let column = e.column();
+            Err(PacketError::BadAgent(format!(
+                "does not match the agent packet shape (column {column})"
+            )))
+        }
+    }
+}
+
+/*
+ * a report parse error that is safe to log: the missing field's name (one of
+ * our own field names), else only the column. serde's own message can quote
+ * the bad value, so it is never passed on
+ */
+fn report_error_reason(error: &serde_json::Error) -> String {
+    let message = error.to_string();
+    let stripped = message.strip_prefix("missing field `");
+    match stripped {
+        Some(rest) => {
+            let closing = rest.find('`');
+            match closing {
+                Some(end) => {
+                    let field = &rest[..end];
+                    return format!("missing field {field}");
+                }
+                None => {}
+            }
+        }
+        None => {}
+    }
+
+    let column = error.column();
+    format!("does not match the report shape (column {column})")
+}
+
+/*
+ * checks an agent packet against the contract limits, like validate does for
+ * reports
+ *
+ * packet: the parsed agent packet to check
+ * returns: Ok(()) or Err with a reason that starts with the field name and
+ *          never repeats a bad text value
+ */
+pub fn validate_agent(packet: &AgentPacket) -> Result<(), String> {
+    if packet.kind != PACKET_KIND_AGENT {
+        return Err(format!("kind: must be {PACKET_KIND_AGENT}"));
+    }
+
+    if packet.v != AGENT_PACKET_VERSION {
+        let v = packet.v;
+        return Err(format!(
+            "v: {v} is not the supported version {AGENT_PACKET_VERSION}"
+        ));
+    }
+
+    let sid_checked = check_lower_hex("sid", &packet.sid, SID_LEN);
+    match sid_checked {
+        Ok(()) => {}
+        Err(reason) => return Err(reason),
+    }
+
+    // sub is optional: only subagent hooks send it
+    match &packet.sub {
+        Some(sub) => {
+            let sub_checked = check_lower_hex("sub", sub, SUB_LEN);
+            match sub_checked {
+                Ok(()) => {}
+                Err(reason) => return Err(reason),
+            }
+        }
+        None => {}
+    }
+
+    let device_id_checked = check_device_id(&packet.device_id);
+    match device_id_checked {
+        Ok(()) => {}
+        Err(reason) => return Err(reason),
+    }
+
+    // project and doing may be empty (the screen shows "?" for no project)
+    let project_checked = check_text("project", &packet.project, MAX_PROJECT_BYTES, true);
+    match project_checked {
+        Ok(()) => {}
+        Err(reason) => return Err(reason),
+    }
+
+    let doing_checked = check_text("doing", &packet.doing, MAX_DOING_BYTES, true);
+    match doing_checked {
+        Ok(()) => {}
+        Err(reason) => return Err(reason),
+    }
+
+    // format characters (bidi overrides, zero-width) could hide or reorder screen text
+    let project_format = check_no_format_chars("project", &packet.project);
+    match project_format {
+        Ok(()) => {}
+        Err(reason) => return Err(reason),
+    }
+    let doing_format = check_no_format_chars("doing", &packet.doing);
+    match doing_format {
+        Ok(()) => {}
+        Err(reason) => return Err(reason),
+    }
+
+    // t is unsigned, so the parser already refused a negative time
+    // ctx is optional; a missing one has nothing to check
+    let ctx = match packet.ctx {
+        Some(c) => c,
+        None => 0,
+    };
+    if ctx > MAX_CTX_PCT {
+        return Err(format!("ctx: {ctx} is outside 0..={MAX_CTX_PCT}"));
+    }
+
+    Ok(())
+}
+
+// checks a text field has no Unicode format characters (category Cf)
+fn check_no_format_chars(name: &str, value: &str) -> Result<(), String> {
+    for c in value.chars() {
+        if is_format_char(c) {
+            return Err(format!("{name}: contains a format character"));
+        }
+    }
+    Ok(())
+}
+
+// checks a field is exactly len lowercase hex characters (sid, sub)
+fn check_lower_hex(name: &str, value: &str, len: usize) -> Result<(), String> {
+    let reason = format!("{name}: must be exactly {len} lowercase hex characters");
+
+    if value.len() != len {
+        return Err(reason);
+    }
+
+    for b in value.as_bytes() {
+        let allowed;
+        if b.is_ascii_digit() || (b'a'..=b'f').contains(b) {
+            allowed = true;
+        } else {
+            allowed = false;
+        }
+
+        if !allowed {
+            return Err(reason);
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,5 +1294,433 @@ mod tests {
                 assert!(!echoes, "reason '{reason}' should not contain the value");
             }
         }
+    }
+
+    // ---- agent packets (T-039) ----
+
+    // an agent packet that respects every limit
+    fn valid_agent() -> AgentPacket {
+        AgentPacket {
+            kind: "agent".to_string(),
+            v: 1,
+            sid: "3f9a0c41b2d7".to_string(),
+            device_id: "dp-3f9a0c41".to_string(),
+            project: "deskpane".to_string(),
+            state: AgentState::NeedsYou,
+            doing: "allow Bash?".to_string(),
+            t: 1794152400123,
+            ctx: None,
+            sub: None,
+        }
+    }
+
+    // fails the test unless validate_agent rejects the packet with a reason naming `field`
+    fn assert_agent_rejected(packet: &AgentPacket, field: &str) {
+        let checked = validate_agent(packet);
+        match checked {
+            Ok(()) => panic!("expected {field} to be rejected, but the packet passed"),
+            Err(reason) => {
+                let prefix = format!("{field}:");
+                assert!(
+                    reason.starts_with(&prefix),
+                    "reason '{reason}' should start with '{prefix}'"
+                );
+            }
+        }
+    }
+
+    // fails the test unless validate_agent accepts the packet
+    fn assert_agent_accepted(packet: &AgentPacket) {
+        let checked = validate_agent(packet);
+        match checked {
+            Ok(()) => {}
+            Err(reason) => panic!("expected the agent packet to pass, got: {reason}"),
+        }
+    }
+
+    // the agent packet from the plan, as JSON text
+    const AGENT_JSON: &str = r#"{"kind":"agent","v":1,"sid":"3f9a0c41b2d7","device_id":"dp-3f9a0c41","project":"deskpane","state":"needs_you","doing":"allow Bash?","t":1794152400123}"#;
+
+    #[test]
+    fn packet_without_kind_is_a_report() {
+        let report = smallest_report("my-pc");
+        let json = serde_json::to_vec(&report).unwrap();
+
+        let parsed = parse_packet(&json);
+
+        match parsed {
+            Ok(ParsedPacket::Report(packet)) => assert_eq!(packet.report.device_id, "my-pc"),
+            other => panic!("expected a report, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn packet_with_null_kind_is_a_report() {
+        let json = r#"{"kind":null,"device_id":"my-pc","label":"a","hostname":"","ip":"","cpu_pct":0,"mem_used_mb":0,"mem_total_mb":0,"disk_used_gb":0,"disk_total_gb":0,"temp_c":0,"uptime_s":0}"#;
+
+        let parsed = parse_packet(json.as_bytes());
+
+        match parsed {
+            Ok(ParsedPacket::Report(_)) => {}
+            other => panic!("expected a report, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn packet_with_kind_agent_parses_as_agent() {
+        let parsed = parse_packet(AGENT_JSON.as_bytes());
+
+        match parsed {
+            Ok(ParsedPacket::Agent(packet)) => assert_eq!(packet, valid_agent()),
+            other => panic!("expected an agent packet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_kind_is_rejected_without_echoing_it() {
+        let json = r#"{"kind":"evil\u001b[2J","device_id":"x"}"#;
+
+        let parsed = parse_packet(json.as_bytes());
+
+        match parsed {
+            Err(PacketError::UnknownKind) => {}
+            other => panic!("expected UnknownKind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kind_that_is_not_text_is_malformed() {
+        // a number kind must never fall through to the report parser
+        let report = smallest_report("my-pc");
+        let mut value = serde_json::to_value(&report).unwrap();
+        value["kind"] = serde_json::json!(57);
+        let json = serde_json::to_vec(&value).unwrap();
+
+        let parsed = parse_packet(&json);
+
+        match parsed {
+            Err(PacketError::Malformed(reason)) => assert!(!reason.contains("57")),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn junk_is_malformed() {
+        let parsed = parse_packet(b"not json");
+        match parsed {
+            Err(PacketError::Malformed(_)) => {}
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn report_missing_a_field_is_a_bad_report() {
+        let parsed = parse_packet(br#"{"device_id":"my-pc"}"#);
+        match parsed {
+            Err(PacketError::BadReport(reason)) => assert!(reason.contains("label")),
+            other => panic!("expected BadReport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bad_agent_shape_reason_does_not_echo_values() {
+        let json = r#"{"kind":"agent","v":1,"sid":"3f9a0c41b2d7","device_id":"dp-1","project":"p","state":"evil-state","doing":"","t":1}"#;
+
+        let parsed = parse_packet(json.as_bytes());
+
+        match parsed {
+            Err(PacketError::BadAgent(reason)) => {
+                assert!(
+                    !reason.contains("evil"),
+                    "reason '{reason}' echoes the value"
+                )
+            }
+            other => panic!("expected BadAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_agent_packet_passes() {
+        assert_agent_accepted(&valid_agent());
+    }
+
+    #[test]
+    fn agent_packet_wrong_kind_is_rejected() {
+        let mut packet = valid_agent();
+        packet.kind = "report".to_string();
+        assert_agent_rejected(&packet, "kind");
+    }
+
+    #[test]
+    fn agent_packet_wrong_version_is_rejected() {
+        let mut packet = valid_agent();
+        packet.v = 2;
+        assert_agent_rejected(&packet, "v");
+        packet.v = 0;
+        assert_agent_rejected(&packet, "v");
+    }
+
+    #[test]
+    fn sid_must_be_12_lowercase_hex() {
+        let mut packet = valid_agent();
+        packet.sid = "3f9a0c41b2d".to_string();
+        assert_agent_rejected(&packet, "sid");
+        packet.sid = "3f9a0c41b2d70".to_string();
+        assert_agent_rejected(&packet, "sid");
+        packet.sid = "3F9A0C41B2D7".to_string();
+        assert_agent_rejected(&packet, "sid");
+        packet.sid = "3f9a0c41b2dz".to_string();
+        assert_agent_rejected(&packet, "sid");
+        packet.sid = String::new();
+        assert_agent_rejected(&packet, "sid");
+        // 12 bytes, but not 12 hex characters
+        packet.sid = "3f9a0c41b\u{e9}d".to_string();
+        assert_agent_rejected(&packet, "sid");
+        packet.sid = "0123456789ab".to_string();
+        assert_agent_accepted(&packet);
+    }
+
+    #[test]
+    fn agent_device_id_uses_the_device_id_rule() {
+        let mut packet = valid_agent();
+        packet.device_id = "-rm".to_string();
+        assert_agent_rejected(&packet, "device_id");
+        packet.device_id = String::new();
+        assert_agent_rejected(&packet, "device_id");
+        packet.device_id = "a".repeat(65);
+        assert_agent_rejected(&packet, "device_id");
+        packet.device_id = "a".repeat(64);
+        assert_agent_accepted(&packet);
+    }
+
+    #[test]
+    fn project_over_32_bytes_is_rejected() {
+        let mut packet = valid_agent();
+        packet.project = "p".repeat(32);
+        assert_agent_accepted(&packet);
+        packet.project = "p".repeat(33);
+        assert_agent_rejected(&packet, "project");
+        // 9 emoji are 9 characters but 36 bytes
+        packet.project = "\u{1F600}".repeat(9);
+        assert_agent_rejected(&packet, "project");
+    }
+
+    #[test]
+    fn doing_over_32_bytes_is_rejected() {
+        let mut packet = valid_agent();
+        packet.doing = "d".repeat(32);
+        assert_agent_accepted(&packet);
+        packet.doing = "d".repeat(33);
+        assert_agent_rejected(&packet, "doing");
+    }
+
+    #[test]
+    fn empty_project_and_doing_pass() {
+        let mut packet = valid_agent();
+        packet.project = String::new();
+        packet.doing = String::new();
+        assert_agent_accepted(&packet);
+    }
+
+    #[test]
+    fn agent_text_with_control_characters_is_rejected() {
+        let mut packet = valid_agent();
+        packet.project = "deskpane\u{001B}[2J".to_string();
+        assert_agent_rejected(&packet, "project");
+
+        let mut packet = valid_agent();
+        packet.doing = "a\nb".to_string();
+        assert_agent_rejected(&packet, "doing");
+
+        let mut packet = valid_agent();
+        packet.doing = "\u{009B}2J".to_string();
+        assert_agent_rejected(&packet, "doing");
+    }
+
+    #[test]
+    fn agent_reason_does_not_echo_the_value() {
+        let mut packet = valid_agent();
+        packet.project = "evil\u{0007}".to_string();
+        let checked = validate_agent(&packet);
+        match checked {
+            Ok(()) => panic!("expected project to be rejected"),
+            Err(reason) => assert!(!reason.contains("evil")),
+        }
+    }
+
+    #[test]
+    fn unknown_state_is_rejected() {
+        let json = AGENT_JSON.replace("needs_you", "sleeping");
+        let parsed = parse_packet(json.as_bytes());
+        match parsed {
+            Err(PacketError::BadAgent(reason)) => assert!(!reason.contains("sleeping")),
+            other => panic!("expected BadAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_state_word_parses() {
+        let words = [
+            ("idle", AgentState::Idle),
+            ("working", AgentState::Working),
+            ("done", AgentState::Done),
+            ("needs_you", AgentState::NeedsYou),
+            ("error", AgentState::Error),
+            ("ended", AgentState::Ended),
+        ];
+        for (word, state) in words {
+            let json = AGENT_JSON.replace("needs_you", word);
+            let packet: AgentPacket = serde_json::from_str(&json).unwrap();
+            assert_eq!(packet.state, state);
+            assert_eq!(state.as_str(), word);
+        }
+    }
+
+    #[test]
+    fn agent_packet_unknown_fields_are_ignored() {
+        let json = AGENT_JSON.replace(r#""t":"#, r#""future":{"a":[1,2]},"t":"#);
+        let packet: AgentPacket = serde_json::from_str(&json).unwrap();
+        assert_eq!(packet, valid_agent());
+    }
+
+    #[test]
+    fn ctx_out_of_range_is_rejected() {
+        let mut packet = valid_agent();
+        packet.ctx = Some(101);
+        assert_agent_rejected(&packet, "ctx");
+        packet.ctx = Some(100);
+        assert_agent_accepted(&packet);
+        packet.ctx = Some(0);
+        assert_agent_accepted(&packet);
+    }
+
+    #[test]
+    fn missing_ctx_is_fine() {
+        let packet: AgentPacket = serde_json::from_str(AGENT_JSON).unwrap();
+        assert_eq!(packet.ctx, None);
+        assert_agent_accepted(&packet);
+        // a packet without ctx is sent without the field
+        let json = serde_json::to_string(&packet).unwrap();
+        assert!(!json.contains("ctx"));
+    }
+
+    #[test]
+    fn negative_time_is_refused_by_the_parser() {
+        let json = AGENT_JSON.replace("1794152400123", "-1");
+        assert!(serde_json::from_str::<AgentPacket>(&json).is_err());
+    }
+
+    #[test]
+    fn largest_valid_agent_packet_fits_in_1500_bytes() {
+        // 64-byte id, 32-byte project and doing in 4-byte characters, longest state, biggest numbers
+        let packet = AgentPacket {
+            kind: "agent".to_string(),
+            v: AGENT_PACKET_VERSION,
+            sid: "f".repeat(SID_LEN),
+            device_id: "a".repeat(MAX_NAME_BYTES),
+            project: "\u{1F600}".repeat(8),
+            state: AgentState::NeedsYou,
+            doing: "\u{1F600}".repeat(8),
+            t: u64::MAX,
+            ctx: Some(MAX_CTX_PCT),
+            sub: Some("f".repeat(SUB_LEN)),
+        };
+        assert_agent_accepted(&packet);
+
+        let bytes = serde_json::to_vec(&packet).unwrap();
+
+        assert!(bytes.len() < 1500);
+        assert!(bytes.len() < 300, "{} bytes", bytes.len());
+    }
+
+    // ---- review fixes (T-045) ----
+
+    #[test]
+    fn sub_must_be_8_lowercase_hex_when_present() {
+        let mut packet = valid_agent();
+        packet.sub = Some("0a1b2c3d".to_string());
+        assert_agent_accepted(&packet);
+        for bad in [
+            "0a1b2c3",
+            "0a1b2c3d4",
+            "0A1B2C3D",
+            "0a1b2c3z",
+            "",
+            "0a1b2c\u{e9}",
+        ] {
+            packet.sub = Some(bad.to_string());
+            assert_agent_rejected(&packet, "sub");
+        }
+    }
+
+    #[test]
+    fn packet_without_sub_still_parses_and_is_sent_without_it() {
+        // old clients send no sub
+        let packet: AgentPacket = serde_json::from_str(AGENT_JSON).unwrap();
+        assert_eq!(packet.sub, None);
+        assert_agent_accepted(&packet);
+        assert!(!serde_json::to_string(&packet).unwrap().contains("sub"));
+    }
+
+    #[test]
+    fn bad_report_reason_does_not_echo_values() {
+        let json = r#"{"device_id":"my-pc","label":"a","hostname":"","ip":"","cpu_pct":"evil-text","mem_used_mb":0,"mem_total_mb":0,"disk_used_gb":0,"disk_total_gb":0,"temp_c":0,"uptime_s":0}"#;
+
+        let parsed = parse_packet(json.as_bytes());
+
+        match parsed {
+            Err(PacketError::BadReport(reason)) => {
+                assert!(
+                    !reason.contains("evil"),
+                    "reason '{reason}' echoes the value"
+                );
+                assert!(reason.contains("column"));
+            }
+            other => panic!("expected BadReport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bad_report_reason_names_only_the_missing_field() {
+        let parsed = parse_packet(br#"{"device_id":"my-pc","label":"x"}"#);
+        match parsed {
+            Err(PacketError::BadReport(reason)) => {
+                assert_eq!(reason, "missing field hostname");
+            }
+            other => panic!("expected BadReport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn format_characters_are_rejected_in_project_and_doing() {
+        // right-to-left override, zero-width space, byte order mark, a tag character
+        for c in [
+            '\u{202E}',
+            '\u{200B}',
+            '\u{FEFF}',
+            '\u{E0041}',
+            '\u{2066}',
+            '\u{00AD}',
+        ] {
+            assert!(is_format_char(c), "{c:?} should be a format character");
+
+            let mut packet = valid_agent();
+            packet.project = format!("desk{c}pane");
+            assert_agent_rejected(&packet, "project");
+
+            let mut packet = valid_agent();
+            packet.doing = format!("allow{c} Bash?");
+            assert_agent_rejected(&packet, "doing");
+        }
+    }
+
+    #[test]
+    fn ordinary_text_is_not_format_characters() {
+        for c in ['a', 'Z', '0', ' ', '\u{e9}', '\u{1F600}', '\u{4E2D}', '?'] {
+            assert!(!is_format_char(c), "{c:?}");
+        }
+        let mut packet = valid_agent();
+        packet.project = "K\u{fc}che \u{1F600}".to_string();
+        assert_agent_accepted(&packet);
     }
 }

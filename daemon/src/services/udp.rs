@@ -1,9 +1,11 @@
 //! Both ends of a UDP link: `UdpSocketServer` receives packets and answers
 //! them (async, used by the daemon) and `UdpClient` sends to one address and
 //! reads its replies without waiting (blocking, used by the reporter). What
-//! the bytes mean is the caller's job.
+//! `send_datagram` sends one packet and never panics or prints (agent
+//! hooks). What the bytes mean is the caller's job.
 
 use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use std::net::UdpSocket as BlockingUdpSocket;
 
 use tokio::net::UdpSocket as AsyncUdpSocket;
@@ -180,6 +182,57 @@ impl UdpClient {
                 false
             }
         }
+    }
+}
+
+/*
+ * sends one packet to target from a fresh non-blocking socket, and never
+ * panics or prints: for short-lived callers (a Claude Code hook) that must
+ * stay silent and decide themselves what to log. A host name is resolved
+ * with the system resolver, which may block; the caller bounds that with its
+ * own deadline.
+ *
+ * target: address to send to, e.g. 192.168.1.50:8765 or pi-zero:8765
+ * bytes: the packet
+ * returns: Ok(()) once the OS took the packet, or Err with the reason
+ */
+pub fn send_datagram(target: &str, bytes: &[u8]) -> Result<(), String> {
+    // resolve the target, and keep the first address it gives
+    let resolved = target.to_socket_addrs();
+    let mut addrs = match resolved {
+        Ok(a) => a,
+        Err(e) => return Err(format!("resolve {target}: {e}")),
+    };
+    let first = addrs.next();
+    let addr = match first {
+        Some(a) => a,
+        None => return Err(format!("resolve {target}: no address")),
+    };
+
+    // a local socket of the same family as the target, any free port
+    let local;
+    if addr.is_ipv6() {
+        local = "[::]:0";
+    } else {
+        local = "0.0.0.0:0";
+    }
+    let bound = BlockingUdpSocket::bind(local);
+    let socket = match bound {
+        Ok(s) => s,
+        Err(e) => return Err(format!("bind local udp socket: {e}")),
+    };
+
+    // never wait on the network
+    let switched = socket.set_nonblocking(true);
+    match switched {
+        Ok(_) => {}
+        Err(e) => return Err(format!("non-blocking udp socket: {e}")),
+    }
+
+    let sent = socket.send_to(bytes, addr);
+    match sent {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("send to {addr}: {e}")),
     }
 }
 
@@ -509,5 +562,80 @@ mod tests {
 
         let (bytes, _) = server.receive().await.unwrap();
         assert_eq!(bytes, b"{\"device_id\":\"x\"}");
+    }
+
+    // ---- send_datagram: one packet, never panics (agent hooks) ----
+
+    #[test]
+    fn send_datagram_arrives_unchanged() {
+        let (receiver, addr) = blocking_receiver();
+
+        let sent = send_datagram(&addr, b"{\"kind\":\"agent\"}");
+
+        assert_eq!(sent, Ok(()));
+        let mut buf = [0u8; 64];
+        let (len, _) = receiver.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..len], b"{\"kind\":\"agent\"}");
+    }
+
+    #[test]
+    fn send_datagram_resolves_hostname_target() {
+        let (receiver, addr) = blocking_receiver();
+        let port = addr.rsplit_once(':').unwrap().1;
+
+        let sent = send_datagram(&format!("localhost:{port}"), b"hi");
+
+        assert_eq!(sent, Ok(()));
+        let mut buf = [0u8; 16];
+        let (len, _) = receiver.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..len], b"hi");
+    }
+
+    #[test]
+    fn send_datagram_to_ipv6_loopback() {
+        // skipped quietly when the machine has no IPv6 loopback
+        let bound = BlockingUdpSocket::bind("[::1]:0");
+        let receiver = match bound {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let addr = receiver.local_addr().unwrap().to_string();
+
+        let sent = send_datagram(&addr, b"v6");
+
+        assert_eq!(sent, Ok(()));
+        let mut buf = [0u8; 16];
+        let (len, _) = receiver.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..len], b"v6");
+    }
+
+    #[test]
+    fn send_datagram_invalid_target_is_an_error_not_a_panic() {
+        let sent = send_datagram("not-an-address", b"x");
+        assert!(sent.is_err());
+        let no_port = send_datagram("127.0.0.1", b"x");
+        assert!(no_port.is_err());
+    }
+
+    #[test]
+    fn send_datagram_when_nobody_listens_is_ok() {
+        // UDP has no handshake: the packet just goes nowhere
+        let (receiver, addr) = blocking_receiver();
+        drop(receiver);
+
+        let sent = send_datagram(&addr, b"x");
+
+        assert_eq!(sent, Ok(()));
+    }
+
+    #[test]
+    fn send_datagram_too_big_is_an_error() {
+        let (_receiver, addr) = blocking_receiver();
+        let huge = vec![0u8; 70_000];
+
+        assert!(send_datagram(&addr, &huge).is_err());
     }
 }
