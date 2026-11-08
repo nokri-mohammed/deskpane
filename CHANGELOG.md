@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.0-beta.4](https://github.com/nokri-mohammed/deskpane/compare/v0.1.0-beta.3...v0.1.0-beta.4) (2026-11-08)
+
+
+### Features
+
+* agent status packets and daemon agent table ([684f95e](https://github.com/nokri-mohammed/deskpane/commit/684f95ebd780a8de7a91685bab5b6a8e228a44b7))
+* agents page and character packs on the screen ([399b431](https://github.com/nokri-mohammed/deskpane/commit/399b431b77af482ec135019274933dbd514c096c))
+* deskpane agent hook client and hook setup commands ([9688be1](https://github.com/nokri-mohammed/deskpane/commit/9688be19c9f462ca92cd1c4228e8394ae82e9896))
+
+
+### Bug Fixes
+
+* send agent packets to the IPv4 address of a hostname ([cc8401e](https://github.com/nokri-mohammed/deskpane/commit/cc8401e456b53817f059577152f00b431d00ef7e))
+
 ## [0.1.0-beta.3](https://github.com/nokri-mohammed/deskpane/compare/v0.1.0-beta.2...v0.1.0-beta.3) (2026-11-08)
 
 
