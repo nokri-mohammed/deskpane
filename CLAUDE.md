@@ -28,45 +28,85 @@ reporter (each device) --UDP JSON--> daemon (Pi) --Unix socket, one JSON line/se
 
 ```
 daemon/src/
-  lib.rs              pub mod contract; pub mod device_table; pub mod services;
+  lib.rs              pub mod agent_table; pub mod contract; pub mod device_table; pub mod services;
   contract.rs         Report, ReportPacket (+ ack), Reply, build_reply, validate,
-                      check_device_id, limit constants (MAX_NAME_BYTES, MAX_REPLY_BYTES, ...)
+                      check_device_id, limit constants (MAX_NAME_BYTES, MAX_REPLY_BYTES, ...);
+                      agent packets: PacketKind, parse_packet (kind probe), AgentPacket,
+                      AgentState, validate_agent, AGENT_PACKET_VERSION, MAX_PROJECT_BYTES,
+                      MAX_DOING_BYTES, SID_LEN; socket line: Envelope, AgentSession
   device_table.rs     DeviceTable of DeviceEntry, pure insert_report (cap, IP ownership ->
                       InsertOutcome) and forget_silent (expiry)
-  main.rs             project logic: bind_error_message, store_report, udp_server (replies),
-                      forget_silent_devices, broadcast_statuses, unix_socket_relay, main;
-                      OFFLINE_AFTER, FORGET_AFTER, MAX_DEVICES, REPLY_EVERY, EXIT_PORT_IN_USE
+  agent_table.rs      AgentTable (sessions + recently ended sids) of AgentEntry, pure
+                      insert_agent (caps, IP ownership, per-key reorder guard, pending
+                      needs_you keys per subagent, eviction -> AgentOutcome), forget_agents,
+                      agent_session (running_s, state_s, silent_s, quiet)
+  main.rs             project logic: bind_error_message, store_report, store_agent,
+                      udp_server (kind dispatch, replies for reports only),
+                      handle_agent_packet + agent_outcome_line (refusals through the log
+                      limiter, new sessions always), forget_silent_devices,
+                      forget_silent_agents, broadcast_statuses (envelope + label join),
+                      unix_socket_relay, main; OFFLINE_AFTER, FORGET_AFTER, MAX_DEVICES,
+                      REPLY_EVERY, EXIT_PORT_IN_USE, MAX_AGENTS, AGENT_* windows
   services/
     broadcaster.rs    tokio broadcast channel that sends JSON
     reply_limiter.rs  ReplyLimiter: per-source and per-second reply limits, capped memory
     udp.rs            UdpSocketServer (async, daemon: try_new, receive, send_to) +
-                      UdpClient (blocking, reporter: send, try_receive -> Received)
+                      UdpClient (blocking, reporter: send, try_receive -> Received) +
+                      send_datagram (one packet, never panics or prints: agent hooks)
     unix_socket.rs    UnixSocketServer + Subscriber, #[cfg(unix)] only
 reporter/src/
   main.rs             clap CLI, resolve_identity, read_reply, review_replies, build_report,
                       run (back-off loop), report_once; exit codes EXIT_USAGE 2, and for
-                      --once only EXIT_ID_IN_USE 10, EXIT_NO_ANSWER 12
+                      --once only EXIT_ID_IN_USE 10, EXIT_NO_ANSWER 12; `deskpane agent`:
+                      hook_main / run_hook (500 ms deadline, exit 0, no stdout), is_hook_call,
+                      drain_hook_stdin, hook_args, install_hooks, uninstall_hooks,
+                      exe_location_warning, run_agent_test
+  agent.rs            pure hook path: HookInput, parse_hook_input, map_event, tool_label,
+                      session_sid, sub_key, resolve_project (home folder sends ""),
+                      build_agent_packet
   services/
+    capped_reader.rs  read_capped: read a stream to the end, keep at most N bytes
+    claude_settings.rs pure merge_agent_hooks / remove_agent_hooks on a Claude Code settings
+                      document, command_handler, is_agent_handler, backup_suffix
+    settings_file.rs  read_json_file (+ FileStamp fingerprint: mtime, length, SHA-256),
+                      backup_file (never overwrites), write_atomically (temp file + rename,
+                      refuses if the file changed); files created 0600, symlinks followed
+    watchdog.rs       start_watchdog: run one action after a delay on a background thread
     conflict.rs       ConflictTracker: warn once, back off 300 s when a conflict outlasts the
                       grace window (run mode never exits on a conflict)
     machine_id.rs     read_machine_id per OS + pure parse_* and derive_device_id (sha2)
     system_stats.rs   SystemStats (sysinfo wrapper) + pure pick_disk_gb / pick_cpu_temp
+reporter/tests/
+  agent_hook.rs       runs the real binary as a hook: stdout empty, exit 0, deadline, caps
+  agent_setup.rs      runs hooks-snippet, install-hooks, uninstall-hooks, test (temp files only)
 pi/
   dashboard.py        reads the socket, draws an overview page, then one device per page
-  layout.py           pure helpers, no pygame: read_version, overview_layout, version_position
+  layout.py           pure helpers, no pygame: read_version, overview_layout (with the agents
+                      line), version_position; agents page: sort_agents, agent_style, page_ring,
+                      agent_rows_layout, fmt_elapsed, agent_summary, fit_text,
+                      should_focus_agents, parse_socket_line (envelope or legacy array)
+  charpack.py         pure character pack helpers: pack format v1, frame_rect, looks,
+                      assign_looks, character_pose, anim_frame, best_scale, track_sessions,
+                      plan_pack_install, check_pack_file
+  charpack_install.py stdlib pack installer, run as python3 -I, --check mode
+  sprites.py          thin pygame loader and scaled-frame cache
   fb_display.py       framebuffer drawing
   touch.py            evdev tap watcher
-  tests/test_layout.py  stdlib unittest for layout.py
+  tests/              stdlib unittest: test_layout, test_charpack, test_charpack_install,
+                      test_deploy_characters (fake-root shell tests), fixtures.py (PNG and
+                      zip fixtures built in code)
 deploy/
   systemd/*.service   the four units the Pi bundle installs (static, user deskpane)
-  install.sh          installs or upgrades the Pi bundle (runs as root on the Pi)
-  uninstall.sh        removes it (--purge also removes settings, user, boot lines)
+  install.sh          installs or upgrades the Pi bundle (runs as root on the Pi);
+                      --characters ZIP / --remove-characters manage /var/lib/deskpane/characters
+  uninstall.sh        removes it (--purge also removes settings, user, boot lines, /var/lib/deskpane)
   overlay.env         pinned display overlay URL + SHA-256 (the overlay is never shipped)
   env.example         becomes /etc/deskpane/env on first install
   README.txt          bundle readme
 scripts/
   package-pi-bundle.sh  builds dist/deskpane-pi-aarch64.tar.gz
   provision-pi.sh       builds the bundle and runs its install.sh on a Pi over SSH
+  check-no-pack-files.sh  licence guard: CI fails if git tracks a character pack file
 docs/
   CONTRACT.md         JSON wire shape and report limits
   INSTALL.md          user install guide (Pi, Linux and Windows reporters)
@@ -90,8 +130,8 @@ Use `~/.cargo/bin/cargo`. `/usr/bin/cargo` is 1.75 and too old for this workspac
 `toolchain:` inputs in `.github/workflows/`.
 
 ```bash
-~/.cargo/bin/cargo test --workspace                                   # 221 tests: daemon 142, reporter 79
-python3 -m unittest discover -s pi/tests                             # 18 tests: pi/layout.py (CI runs it too)
+~/.cargo/bin/cargo test --workspace                                   # 443 tests: daemon 238, reporter 205
+python3 -m unittest discover -s pi/tests                             # 214 tests: layout 87, charpack 68, pack install 27, fake-root deploy 32 (CI runs it too)
 ~/.cargo/bin/cargo build --release --locked --target aarch64-unknown-linux-musl # Pi build, static (linker in .cargo/config.toml)
 scripts/package-pi-bundle.sh                                          # Pi bundle from that build, into dist/
 scripts/provision-pi.sh pi-zero                                       # bundle + install.sh on a Pi over SSH
@@ -135,6 +175,9 @@ All Rust here follows the `rust-patterns` skill from the claude-team hub
   wrong type means a wrong release. One version covers the whole project (`[workspace.package]`
   in `Cargo.toml`); never edit it by hand.
 - Never use em dashes in docs or comments.
+- Character packs (`assets/characters/`, git-ignored) are licensed to the owner. Never commit
+  them, put them in a bundle, or show them in docs or `docs/media/`. `scripts/check-no-pack-files.sh`
+  (CI) and `package-pi-bundle.sh` enforce this.
 
 ## Team
 
@@ -151,7 +194,10 @@ Executives on this project (hub plugins `architecture`, `tdd`, `review`, `patter
   = "...")]` for setup failures. Socket tests use short `/tmp/phd-test-{pid}-{name}.sock` paths
   and delete them. Pure logic takes plain data so tests feed fake readings (times are passed
   in as `Instant`s). `pi/` tests are stdlib `unittest` in `pi/tests/`, for pure code only (no
-  pygame): `python3 -m unittest discover -s pi/tests`.
+  pygame): `python3 -m unittest discover -s pi/tests`. Shell scripts are tested in
+  `pi/tests/test_deploy_characters.py` (real scripts under bash, `DESKPANE_DESTDIR` temp root,
+  stub commands first on PATH). Pack PNGs and zips are built in code by `pi/tests/fixtures.py`;
+  never use the real pack in tests.
 - **code-reviewer**: review Rust against `rust-patterns` (no shorthand, comments above, generic
   code in `services/`, project logic in `main.rs`). Check new services have edge-case tests.
 - **security-reviewer**: untrusted input enters in one place: UDP packets on `0.0.0.0:8765`,

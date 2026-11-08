@@ -2,7 +2,7 @@
 
 **A small screen on your desk that shows what your computers put on it.** Live CPU, memory,
 disk and temperature for every PC on your network, on a Raspberry Pi with a 3.5 inch
-touchscreen. Soon your AI agents can put a task list on it too.
+touchscreen. It also shows your Claude Code sessions, and which one needs you.
 
 <p align="center"><img src="docs/media/screen.gif" width="420" alt="The deskpane screen on a Pi: the overview page, then a tap moves to each device page with CPU, RAM, disk and temperature"></p>
 
@@ -66,7 +66,9 @@ Parts and links: [docs/HARDWARE.md](docs/HARDWARE.md).
 
 ## Roadmap
 
-- **Now:** live stats from the computers on your network.
+- **Now:** live stats from your computers, and a Claude Code status page
+  ([setup](docs/INSTALL.md#show-your-ai-agents-on-the-screen), optional
+  [character packs](docs/CHARACTERS.md)).
 - **Next:** a task view that AI agents keep up to date over MCP.
 - **Later:** a free canvas that you design in a web page.
 

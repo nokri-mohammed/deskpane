@@ -9,18 +9,18 @@ For a security problem, do not open an issue. See [SECURITY.md](SECURITY.md).
 
 | Folder | What it is |
 |---|---|
-| `daemon/` | Rust. Runs on the Pi. Receives the reports over UDP and serves them to the dashboard. Also a library with the shared report type. |
-| `reporter/` | Rust. Runs on each computer. Reads the system stats and sends them to the daemon. |
-| `pi/` | Python (pygame). Draws the dashboard on the touchscreen. |
+| `daemon/` | Rust. Runs on the Pi. Receives the reports and agent status packets over UDP and serves them to the dashboard. Also a library with the shared report type. |
+| `reporter/` | Rust. Runs on each computer. Reads the system stats and sends them to the daemon. `deskpane agent` is the Claude Code hook client. |
+| `pi/` | Python (pygame). Draws the dashboard on the touchscreen, including the agents page and the optional character packs (`charpack.py`, `charpack_install.py`, `sprites.py`). |
 | `deploy/` | The Pi installer, the uninstaller and the systemd units. |
 | `scripts/` | Scripts that build the Pi bundle and install it on a Pi over SSH. |
-| `docs/` | The guides (`INSTALL.md`, `HARDWARE.md`, `RECOVERY.md`), the JSON contract (`CONTRACT.md`), the plans, `diagram/` (architecture diagram source and rendered PNGs) and `media/` (photos of the screen). |
+| `docs/` | The guides (`INSTALL.md`, `HARDWARE.md`, `RECOVERY.md`, `CHARACTERS.md`), the JSON contract (`CONTRACT.md`), the ideas (`IDEAS.md`), the plans, `diagram/` (architecture diagram source and rendered PNGs) and `media/` (photos of the screen). |
 
 `daemon/` and `reporter/` are one Cargo workspace: one `Cargo.toml` at the repository root and
 one `Cargo.lock`. `reporter` uses `daemon` as a library for the shared `Report` and
 `DeviceStatus` types (`daemon/src/contract.rs`) and the `UdpClient` in `daemon::services::udp`.
 It does not run any of the daemon's own server code. Inside `daemon/`, `src/device_table.rs`
-holds the device table (the 32-device cap and the expiry) and `src/services/` holds the
+holds the device table (the 32-device cap and the expiry), `src/agent_table.rs` holds the agent session table (the 16-session cap, ownership, ordering and expiry) and `src/services/` holds the
 generic plumbing: UDP server and client, broadcaster, Unix socket server.
 
 ## How it works
@@ -37,13 +37,19 @@ reporter (each device) --UDP JSON--> daemon (Pi) --Unix socket, one JSON line/se
   latest report per device in memory and marks a device offline after 15 seconds of silence.
   The `PROTOCOL` setting is the single switch point for adding TCP and then TCP with mutual
   TLS later. Only `udp` works today.
-- **The local hop.** The daemon sends the device list to the dashboard over a Unix domain
-  socket, one JSON line every second. This hop needs no TLS: file permissions control who can
+- **Agent packets.** `deskpane agent` runs from Claude Code hooks and sends one small status
+  packet (`"kind": "agent"`) to the same UDP port. The daemon keeps one row for each session in
+  its agent table and sends no reply. See the agent section of
+  [docs/CONTRACT.md](docs/CONTRACT.md#agent-status-packets).
+- **The local hop.** The daemon sends the device list and the agent sessions to the dashboard
+  over a Unix domain socket, one JSON line every second (an envelope with a `stats` and an
+  `agents` view). This hop needs no TLS: file permissions control who can
   open the socket. The daemon and the UI stay two separate processes without a second network
   port.
 - **The dashboard** is Python and pygame. It reads the socket in a background thread and
   reconnects if the daemon is not up yet. It draws straight to the framebuffer (`/dev/fb1`, no
-  X11, because the SPI panel is not a DRM display): an overview page, then one page per device
+  X11, because the SPI panel is not a DRM display): an overview page, an agents page when a
+  session exists, then one page per device
   with ring gauges for CPU and memory, a bar for disk, temperature, label, hostname, IP
   address, uptime and online or offline. A background thread reads the touchscreen's raw evdev
   events and moves to the next page on a tap. A drawing error shows an error screen for that
@@ -99,6 +105,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all --check
 shellcheck deploy/install.sh deploy/uninstall.sh scripts/*.sh
 python3 -m py_compile pi/*.py
+python3 -m unittest discover -s pi/tests
+scripts/check-no-pack-files.sh
 ```
 
 To build the Pi bundle:
@@ -244,12 +252,20 @@ New code needs tests. A pull request without tests for new behavior is not merge
 - Tests clean up after themselves. Socket tests use short paths such as
   `/tmp/phd-test-<pid>-<name>.sock` and delete them.
 
-The Python code in `pi/` has no tests yet. CI only checks that it compiles.
+The Python code in `pi/` has tests too: the pure helpers (no pygame) and the install scripts
+(under a fake root, with stub commands). They use only the standard library:
+
+```bash
+python3 -m unittest discover -s pi/tests
+```
+
+The tests build their own PNGs and zips. Never use a real character pack in a test, and never
+commit one (`scripts/check-no-pack-files.sh` fails CI if you do).
 
 ## The JSON contract
 
 [docs/CONTRACT.md](docs/CONTRACT.md) describes the report that every reporter sends to the
-daemon. `daemon/src/contract.rs` holds the Rust type and the limits. People run reporters and
+daemon, the agent status packet and the socket line. `daemon/src/contract.rs` holds the Rust type and the limits. People run reporters and
 daemons of different versions at the same time, so this contract must stay compatible.
 
 - A new field in `Report` must be optional (`Option<T>` with `#[serde(default)]`). Then a new

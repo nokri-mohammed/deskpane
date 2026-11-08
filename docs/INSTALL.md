@@ -58,11 +58,12 @@ In this guide:
 3. [Manual install](#manual-install)
 4. [Check that it works](#check-that-it-works)
 5. [Send stats from your other computers](#send-stats-from-your-other-computers)
-6. [Change the settings](#change-the-settings)
-7. [Upgrade](#upgrade)
-8. [Roll back to the previous version](#roll-back-to-the-previous-version)
-9. [Uninstall](#uninstall)
-10. [Troubleshooting](#troubleshooting)
+6. [Show your AI agents on the screen](#show-your-ai-agents-on-the-screen)
+7. [Change the settings](#change-the-settings)
+8. [Upgrade](#upgrade)
+9. [Roll back to the previous version](#roll-back-to-the-previous-version)
+10. [Uninstall](#uninstall)
+11. [Troubleshooting](#troubleshooting)
 
 ## What you need
 
@@ -478,6 +479,122 @@ To start the reporter when you log in, use Task Scheduler:
 
 A reporter that runs as a Windows service is planned for a later version.
 
+## Show your AI agents on the screen
+
+From 0.2.0-beta.1 the screen can show your Claude Code sessions: one row for each session, with
+the project name, what it does and a big amber "NEEDS YOU" when it waits for you. Each session
+sends a small status packet from a Claude Code hook. The packet holds the project folder name
+(not the path), a tool name and a state word. It never holds your prompts, files or commands.
+[SECURITY.md](../SECURITY.md#agent-status-packets) lists what is sent and what is not.
+
+**Upgrade the Pi first.** An older daemon cannot read agent packets. It drops each one and
+writes one line to its log. Nothing breaks, but nothing shows. See [Upgrade](#upgrade).
+
+On each computer where you run Claude Code, you need the `deskpane` program of the same
+version. Then pick one of two ways.
+
+### Look at the settings first
+
+This prints the hooks block and changes nothing. Use your Pi's IP address:
+
+```bash
+deskpane agent hooks-snippet --daemon 192.168.1.50:8765
+```
+
+Merge the block into `~/.claude/settings.json` by hand if you like.
+
+### Let deskpane edit the settings
+
+```bash
+deskpane agent install-hooks --daemon 192.168.1.50:8765
+```
+
+This adds one hook handler to the events it needs and keeps every other entry. It first copies
+your settings file to `settings.json.deskpane-backup-<time>` next to it (mode 0600, and it never
+overwrites an older backup). It stops with an error if the file is not valid JSON. Run it twice
+and nothing changes the second time. To look first, add `--dry-run`: it prints the result and
+writes nothing.
+
+Options of `install-hooks` and `hooks-snippet`:
+
+| Option | What it is |
+|---|---|
+| `--daemon ADDRESS` | The Pi's IP address and port. Required. |
+| `--device-id ID` | The id of this computer. Optional; the default is the same id that `deskpane report` makes. It is written into the hook, so the hook does not need the machine id later. |
+| `--project NAME` | Show this name instead of the project folder name. |
+| `--hide-project` | Send no project name. The screen shows `?`. |
+| `--settings FILE` | `install-hooks` and `uninstall-hooks` only: edit this file instead of `~/.claude/settings.json`. |
+| `--dry-run` | `install-hooks` and `uninstall-hooks` only: print the result, write nothing. |
+
+The hook stores the absolute path of the `deskpane` program that you ran. If that program is in
+a build folder (`target`) or a temp folder, the command prints a warning, because the path may
+disappear. Install `deskpane` first (for example in `/usr/local/bin`) and run `install-hooks`
+from there.
+
+### Check it
+
+```bash
+deskpane agent test --daemon 192.168.1.50:8765
+```
+
+This sends a fake session through every state in about 10 seconds. Watch the screen: a row
+appears, works, waits for you, fails and ends. The Pi sends no answer, so the screen is the
+check. A session that is already open may need to be restarted before it picks up new hooks.
+
+### Remove it
+
+```bash
+deskpane agent uninstall-hooks
+```
+
+This removes only the deskpane handlers, after another backup, and keeps the rest of your
+settings. Add `--dry-run` to look first.
+
+### Linux, Windows and WSL
+
+| Where Claude Code runs | Settings file | Command |
+|---|---|---|
+| Linux | `~/.claude/settings.json` | `deskpane agent install-hooks --daemon 192.168.1.50:8765` |
+| Windows | `%USERPROFILE%\.claude\settings.json` | `.\deskpane.exe agent install-hooks --daemon 192.168.1.50:8765` in PowerShell |
+| WSL | the Linux file inside WSL | the Linux `deskpane`, run inside WSL |
+
+Windows and WSL are separate Claude Code installs with their own settings, so set up each one.
+The WSL machine has another id than the Windows machine, so the screen shows the id (for
+example `dp-3f9a0c41`) instead of a label unless a reporter runs there with the same id. Run
+`deskpane report` in WSL as well if you want the label.
+
+The hook always exits 0, writes nothing to stdout and gives up after 500 ms, so it cannot block
+or slow down Claude Code. If the Pi is off, the hook just sends into the void.
+
+### Character packs (optional)
+
+The agents page can draw a small pixel character for each project. This needs a character pack
+that you own: a zip in the format of [CHARACTERS.md](CHARACTERS.md). The project does not ship a
+pack. Without one, the page shows built-in icons and works the same.
+
+Copy the zip to the Pi (for example with `scp my-pack.zip my-user@pi-zero:`), then use one of:
+
+```bash
+# with the one-line installer, on the Pi
+curl -fsSL https://raw.githubusercontent.com/nokri-mohammed/deskpane/main/get.sh | sudo bash -s -- --characters ~/my-pack.zip
+
+# with an extracted bundle, on the Pi
+sudo ./install.sh --characters ~/my-pack.zip
+```
+
+`get.sh` checks the pack before it installs anything, and stops with a message if the bundle is
+too old for the flag. `install.sh` checks it again. The zip must be a normal file (not a
+symlink) of at most 4 MiB. It is checked and copied file by file, never unzipped. If the check
+refuses the pack, the installer stops and changes nothing. If the copy itself fails after
+that check, the installer prints a warning and goes on with the built-in icons (an older
+installed pack stays as it was). The pack goes to
+`/var/lib/deskpane/characters`, and the dashboard restarts to load it.
+
+- An upgrade without `--characters` keeps the installed pack.
+- `sudo ./install.sh --remove-characters` removes it (the icons come back).
+- `sudo ./uninstall.sh` keeps it; `sudo ./uninstall.sh --purge` removes it.
+- `--characters` cannot be used with `--reporter-only` or `--no-display`.
+
 ## Change the settings
 
 The settings are in `/etc/deskpane/env` on the Pi. An upgrade never changes this
@@ -526,6 +643,10 @@ To upgrade, run the `install.sh` of a newer bundle. Your settings stay the same.
 
    For example, if you installed with `--no-reporter`, give `--no-reporter` again. If you do
    not, the installer turns on the Pi's own reporter.
+
+Upgrade the Pi before you set up agent hooks on your computers (see
+[Show your AI agents on the screen](#show-your-ai-agents-on-the-screen)). An installed character
+pack stays in place.
 
 The installer restarts the services with the new version. `--device-id` and `--label` have no
 effect on an upgrade. To change them, edit the settings file (see
