@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "daemon"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "reporter"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "clap",
  "daemon",
