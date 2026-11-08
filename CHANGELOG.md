@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.0-beta.3](https://github.com/nokri-mohammed/deskpane/compare/v0.1.0-beta.2...v0.1.0-beta.3) (2026-11-08)
+
+
+### Features
+
+* automatic device ids, duplicate id check, port-in-use error, bigger clock ([0559794](https://github.com/nokri-mohammed/deskpane/commit/05597949d8198a5823a10f146abb25f7b6d37235))
+
 ## [0.1.0-beta.2](https://github.com/nokri-mohammed/deskpane/compare/v0.1.0-beta.1...v0.1.0-beta.2) (2026-11-07)
 
 
