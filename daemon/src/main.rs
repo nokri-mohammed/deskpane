@@ -4,7 +4,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use daemon::contract::{build_reply, validate, DeviceStatus, Reply, Report, ReportPacket};
+use daemon::agent_table::{
+    agent_session, forget_agents, insert_agent, AgentLimits, AgentOutcome, AgentTable,
+};
+use daemon::contract::{
+    build_reply, parse_packet, validate, validate_agent, AgentPacket, AgentSession, AgentsView,
+    DeviceStatus, Envelope, PacketError, ParsedPacket, Reply, Report, StatsView, Views,
+    ENVELOPE_VERSION,
+};
 use daemon::device_table::{forget_silent, insert_report, DeviceTable, InsertOutcome};
 use daemon::services::broadcaster::Broadcaster;
 use daemon::services::reply_limiter::ReplyLimiter;
@@ -27,8 +34,36 @@ const REPLIES_PER_SECOND: u32 = 20;
 const MAX_REPLY_SOURCES: usize = 256;
 // exit code when the UDP port is taken; the unit has RestartPreventExitStatus=11
 const EXIT_PORT_IN_USE: i32 = 11;
+// agent sessions: at most 16, at most 8 per source IP
+const MAX_AGENTS: usize = 16;
+const MAX_AGENTS_PER_SOURCE: usize = 8;
+// another IP may take a session over after 2 minutes of silence from its owner
+const AGENT_TAKEOVER_AFTER: Duration = Duration::from_secs(120);
+// a packet older than the stored one by less than 5 s is a late arrival
+const AGENT_REORDER_WINDOW: Duration = Duration::from_secs(5);
+// most keys (main agent, subagents) one session remembers as waiting on you
+const MAX_PENDING_PER_SESSION: usize = 8;
+// a working session with no news for 10 min shows as quiet
+const AGENT_QUIET_AFTER: Duration = Duration::from_secs(600);
+// a session silent for 4 h is forgotten, whatever its state
+const AGENT_FORGET_AFTER: Duration = Duration::from_secs(4 * 3600);
 
-type SharedState = Arc<RwLock<DeviceTable>>;
+/// Everything the daemon keeps in memory: the devices and the agent sessions.
+struct Tables {
+    devices: DeviceTable,
+    agents: AgentTable,
+}
+
+type SharedState = Arc<RwLock<Tables>>;
+
+// empty tables, shared between the UDP server and the broadcast tick
+fn new_state() -> SharedState {
+    let tables = Tables {
+        devices: HashMap::new(),
+        agents: AgentTable::new(),
+    };
+    Arc::new(RwLock::new(tables))
+}
 
 /// Transport the daemon listens on for incoming reports. UDP is the only
 /// one implemented today; Tcp and TcpTls are the planned next steps; add
@@ -107,12 +142,130 @@ fn store_report(
 }
 
 /*
- * receives device reports over UDP, stores the latest one per device, and
- * answers a duplicate id (or a report that asks for an ack) with one small,
- * rate limited reply
+ * stores an agent packet under the agent table policy; like reports, the
+ * owner is the source IP only (every hook runs as a new process, new port)
+ *
+ * peer: the address the packet came from
+ */
+fn store_agent(
+    table: &mut AgentTable,
+    packet: AgentPacket,
+    peer: SocketAddr,
+    now: Instant,
+) -> AgentOutcome {
+    let source = reply_source(peer);
+    let limits = AgentLimits {
+        max_agents: MAX_AGENTS,
+        max_per_source: MAX_AGENTS_PER_SOURCE,
+        takeover_after: AGENT_TAKEOVER_AFTER,
+        reorder_window: AGENT_REORDER_WINDOW,
+        max_pending: MAX_PENDING_PER_SESSION,
+    };
+    insert_agent(table, packet, source, now, limits)
+}
+
+/*
+ * checks and stores one agent packet. Agent packets never get a reply. Every
+ * log line goes through log_limiter (one per source per window), because
+ * agent packets arrive on every tool call
+ *
+ * packet: the parsed agent packet
+ * peer: the address it came from
+ */
+async fn handle_agent_packet(
+    state: &SharedState,
+    packet: AgentPacket,
+    peer: SocketAddr,
+    log_limiter: &mut ReplyLimiter,
+) {
+    let now = Instant::now();
+    let source = reply_source(peer);
+
+    // drop packets that break the contract limits (bad sid, text, version)
+    let checked = validate_agent(&packet);
+    match checked {
+        Ok(()) => {}
+        Err(reason) => {
+            if log_limiter.allow(source, now) {
+                eprintln!("daemon: rejected agent packet from {peer}: {reason}");
+            }
+            return;
+        }
+    }
+
+    // store it under the table policy, then release the lock before logging
+    let sid = packet.sid.clone();
+    let mut tables = state.write().await;
+    let outcome = store_agent(&mut tables.agents, packet, peer, now);
+    drop(tables);
+
+    // new sessions always get a line; refusals go through the limiter
+    let line = agent_outcome_line(&outcome, &sid, source);
+    match line {
+        AgentLogLine::Always(text) => eprintln!("{text}"),
+        AgentLogLine::Limited(text) => {
+            if log_limiter.allow(source, now) {
+                eprintln!("{text}");
+            }
+        }
+        AgentLogLine::Silent => {}
+    }
+}
+
+/// Whether and how one agent outcome is logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentLogLine {
+    // logged every time (bounded by the table caps)
+    Always(String),
+    // logged through the per-source log limiter
+    Limited(String),
+    // normal outcome, no line
+    Silent,
+}
+
+/*
+ * the log line for one agent outcome. The sid passed validate (12 hex
+ * characters), so it is safe to log
+ *
+ * outcome: what insert_agent did
+ * sid: the session id
+ * source: the canonical source IP
+ */
+fn agent_outcome_line(outcome: &AgentOutcome, sid: &str, source: std::net::IpAddr) -> AgentLogLine {
+    match outcome {
+        AgentOutcome::Created { evicted } => match evicted {
+            Some(old) => AgentLogLine::Always(format!(
+                "daemon: new agent session {sid} from {source} (evicted {old})"
+            )),
+            None => AgentLogLine::Always(format!("daemon: new agent session {sid} from {source}")),
+        },
+        AgentOutcome::NotOwner => AgentLogLine::Limited(format!(
+            "daemon: agent session {sid} not owned by {source}, dropped"
+        )),
+        AgentOutcome::SourceFull => AgentLogLine::Limited(format!(
+            "daemon: {source} already owns {MAX_AGENTS_PER_SOURCE} agent sessions, dropped {sid}"
+        )),
+        AgentOutcome::TableFull => AgentLogLine::Limited(format!(
+            "daemon: agent table full, dropped new session {sid} from {source}"
+        )),
+        // stored, ended, ignored and late packets are normal: no line
+        AgentOutcome::Stored => AgentLogLine::Silent,
+        AgentOutcome::Removed => AgentLogLine::Silent,
+        AgentOutcome::Ignored => AgentLogLine::Silent,
+        AgentOutcome::OutOfOrder => AgentLogLine::Silent,
+    }
+}
+
+/*
+ * receives device reports and agent packets over UDP on one port. Reports:
+ * stores the latest one per device, and answers a duplicate id (or a report
+ * that asks for an ack) with one small, rate limited reply. Agent packets:
+ * stored in the agent table, never answered.
  */
 async fn udp_server(mut udp_socket_server: UdpSocketServer, state: SharedState) {
     let mut limiter = ReplyLimiter::new(REPLY_EVERY, REPLIES_PER_SECOND, MAX_REPLY_SOURCES);
+    // a second limiter, for bad-packet and agent refusal log lines only (same limits)
+    let mut log_limiter = ReplyLimiter::new(REPLY_EVERY, REPLIES_PER_SECOND, MAX_REPLY_SOURCES);
 
     loop {
         // wait for the next packet from a device
@@ -124,13 +277,37 @@ async fn udp_server(mut udp_socket_server: UdpSocketServer, state: SharedState) 
         // the reply must stay smaller than this
         let request_bytes = bytes.len();
 
-        // Parses the bytes as JSON and checks they match the report's exact
-        // fields/types in one step (plus the optional ack flag).
-        let parsed = serde_json::from_slice::<ReportPacket>(bytes);
+        // look at the kind first: no kind is a report, "agent" is an agent packet
+        let parsed = parse_packet(bytes);
         let packet = match parsed {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("daemon: bad report from {peer}: {e}");
+            Ok(ParsedPacket::Report(p)) => p,
+            Ok(ParsedPacket::Agent(agent)) => {
+                handle_agent_packet(&state, agent, peer, &mut log_limiter).await;
+                continue;
+            }
+            // the reason names only a missing field or a column, never a value
+            Err(PacketError::BadReport(reason)) => {
+                if log_limiter.allow(reply_source(peer), Instant::now()) {
+                    eprintln!("daemon: bad report from {peer}: {reason}");
+                }
+                continue;
+            }
+            Err(PacketError::BadAgent(reason)) => {
+                if log_limiter.allow(reply_source(peer), Instant::now()) {
+                    eprintln!("daemon: bad agent packet from {peer}: {reason}");
+                }
+                continue;
+            }
+            Err(PacketError::UnknownKind) => {
+                if log_limiter.allow(reply_source(peer), Instant::now()) {
+                    eprintln!("daemon: unknown packet kind from {peer}");
+                }
+                continue;
+            }
+            Err(PacketError::Malformed(reason)) => {
+                if log_limiter.allow(reply_source(peer), Instant::now()) {
+                    eprintln!("daemon: bad packet from {peer}: {reason}");
+                }
                 continue;
             }
         };
@@ -148,10 +325,10 @@ async fn udp_server(mut udp_socket_server: UdpSocketServer, state: SharedState) 
         // store it, unless another online machine owns the id or the table is full
         let device_id = packet.report.device_id.clone();
         let now = Instant::now();
-        let mut table = state.write().await;
-        let outcome = store_report(&mut table, packet.report, peer, now);
+        let mut tables = state.write().await;
+        let outcome = store_report(&mut tables.devices, packet.report, peer, now);
         // release the write lock before logging and replying
-        drop(table);
+        drop(tables);
 
         // decide whether this report gets a reply
         let reply;
@@ -199,10 +376,10 @@ async fn udp_server(mut udp_socket_server: UdpSocketServer, state: SharedState) 
  * each one. Runs once per broadcast tick (see main for why).
  */
 async fn forget_silent_devices(state: &SharedState) {
-    let mut table = state.write().await;
-    let forgotten = forget_silent(&mut table, Instant::now(), FORGET_AFTER);
+    let mut tables = state.write().await;
+    let forgotten = forget_silent(&mut tables.devices, Instant::now(), FORGET_AFTER);
     // release the write lock before logging
-    drop(table);
+    drop(tables);
 
     let forget_secs = FORGET_AFTER.as_secs();
     for device_id in &forgotten {
@@ -210,16 +387,35 @@ async fn forget_silent_devices(state: &SharedState) {
     }
 }
 
-/// Snapshot the current state (with online/offline computed) and broadcast
-/// it once, as one JSON array line, to every socket subscriber.
+/*
+ * removes agent sessions silent longer than AGENT_FORGET_AFTER, and logs each
+ * one. Runs on the same tick as forget_silent_devices.
+ */
+async fn forget_silent_agents(state: &SharedState) {
+    let mut tables = state.write().await;
+    let forgotten = forget_agents(&mut tables.agents, Instant::now(), AGENT_FORGET_AFTER);
+    // release the write lock before logging
+    drop(tables);
+
+    let forget_secs = AGENT_FORGET_AFTER.as_secs();
+    for sid in &forgotten {
+        eprintln!("daemon: forgot agent session {sid} after {forget_secs} s of silence");
+    }
+}
+
+/*
+ * snapshot both tables (online/offline and the agent fields computed) and
+ * broadcast them once, as one envelope line, to every socket subscriber:
+ * {"v":1,"views":{"stats":{"devices":[..]},"agents":{"sessions":[..]}}}
+ */
 async fn broadcast_statuses(state: &SharedState, broadcaster: &Broadcaster) {
-    // read-lock the table to look at every device's latest report
+    // read-lock the tables to look at every device and session
     let snapshot = state.read().await;
     // get current timestamp
     let now = Instant::now();
     // build each device's status (online if seen recently) into one list
     let mut statuses: Vec<DeviceStatus> = Vec::new();
-    for entry in snapshot.values() {
+    for entry in snapshot.devices.values() {
         // saturating: a report stamped after `now` counts as 0 s silent, never panics
         let silent_for = now.saturating_duration_since(entry.last_seen);
 
@@ -236,10 +432,31 @@ async fn broadcast_statuses(state: &SharedState, broadcaster: &Broadcaster) {
         };
         statuses.push(status);
     }
+
+    // each session, with the label of the device that has the same device_id
+    let mut sessions: Vec<AgentSession> = Vec::new();
+    for (sid, entry) in snapshot.agents.iter() {
+        let mut label = String::new();
+        let device = snapshot.devices.get(&entry.packet.device_id);
+        match device {
+            Some(d) => label = d.report.label.clone(),
+            None => {}
+        }
+
+        let session = agent_session(sid, entry, &label, now, AGENT_QUIET_AFTER);
+        sessions.push(session);
+    }
     // release the read lock early, before the JSON/broadcast work below
     drop(snapshot);
 
-    broadcaster.send_json(&statuses);
+    let envelope = Envelope {
+        v: ENVELOPE_VERSION,
+        views: Views {
+            stats: StatsView { devices: statuses },
+            agents: AgentsView { sessions: sessions },
+        },
+    };
+    broadcaster.send_json(&envelope);
 }
 
 /// Accepts dashboard connections and, for each one, relays every message
@@ -293,7 +510,7 @@ async fn main() {
 
     let protocol = Protocol::from_env();
 
-    let state: SharedState = Arc::new(RwLock::new(HashMap::new()));
+    let state = new_state();
     let broadcaster = Broadcaster::new(16);
 
     match protocol {
@@ -316,10 +533,11 @@ async fn main() {
                 // listen for incoming reports from devices.
                 udp_server(udp_socket_server, state.clone()),
                 /*
-                 * every second, forget long-silent devices, then build a
-                 * status summary and broadcast it. Forgetting here (not on
-                 * insert) means a device disappears on time even when no
-                 * packets arrive, and the per-packet path stays small.
+                 * every second, forget long-silent devices and agent
+                 * sessions, then build a status summary and broadcast it.
+                 * Forgetting here (not on insert) means an entry disappears
+                 * on time even when no packets arrive, and the per-packet
+                 * path stays small.
                  */
                 async {
                     let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -327,6 +545,7 @@ async fn main() {
                         // wait for the next 1-second tick
                         interval.tick().await;
                         forget_silent_devices(&state).await;
+                        forget_silent_agents(&state).await;
                         broadcast_statuses(&state, &broadcaster).await;
                     }
                 },
@@ -340,6 +559,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daemon::contract::{AgentState, ReportPacket};
     use std::io::{Error, ErrorKind};
     use std::net::{SocketAddr, UdpSocket};
 
@@ -431,11 +651,17 @@ mod tests {
 
     // starts udp_server on a free loopback port; returns its address and the task
     async fn start_daemon() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let (addr, task, _state) = start_daemon_with_state().await;
+        (addr, task)
+    }
+
+    // the same, and also hands back the shared tables for envelope checks
+    async fn start_daemon_with_state() -> (SocketAddr, tokio::task::JoinHandle<()>, SharedState) {
         let server = UdpSocketServer::try_new("127.0.0.1:0").await.unwrap();
         let addr = server.local_addr().unwrap();
-        let state: SharedState = Arc::new(RwLock::new(HashMap::new()));
-        let task = tokio::spawn(udp_server(server, state));
-        (addr, task)
+        let state = new_state();
+        let task = tokio::spawn(udp_server(server, state.clone()));
+        (addr, task, state)
     }
 
     // a blocking socket on the given local IP, with a short read timeout
@@ -583,5 +809,327 @@ mod tests {
         assert!(message.starts_with("deskpane-daemon: error: "));
         assert!(message.contains("not-an-address"));
         assert!(!message.contains('\n'));
+    }
+
+    // ---- agent packets (T-041) ----
+
+    // an agent packet as JSON bytes, for the given session, device and state word
+    fn agent_bytes(sid: &str, device_id: &str, state: &str, t: u64) -> Vec<u8> {
+        format!(
+            r#"{{"kind":"agent","v":1,"sid":"{sid}","device_id":"{device_id}","project":"deskpane","state":"{state}","doing":"allow Bash?","t":{t}}}"#
+        )
+        .into_bytes()
+    }
+
+    // broadcasts once and returns the line the dashboard would read, parsed
+    async fn envelope_line(state: &SharedState) -> serde_json::Value {
+        let broadcaster = Broadcaster::new(4);
+        let mut rx = broadcaster.subscribe();
+        broadcast_statuses(state, &broadcaster).await;
+        let line = rx.recv().await.unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn empty_tables_broadcast_an_empty_envelope() {
+        let state = new_state();
+        let broadcaster = Broadcaster::new(4);
+        let mut rx = broadcaster.subscribe();
+
+        broadcast_statuses(&state, &broadcaster).await;
+
+        // the raw line, exactly as the dashboard reads it
+        let line = rx.recv().await.unwrap();
+        assert_eq!(
+            line,
+            r#"{"v":1,"views":{"stats":{"devices":[]},"agents":{"sessions":[]}}}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_packet_appears_in_the_envelope() {
+        let (daemon, task, state) = start_daemon_with_state().await;
+        let socket = reporter_socket("127.0.0.1");
+
+        tokio::task::spawn_blocking(move || {
+            let bytes = agent_bytes("3f9a0c41b2d7", "dp-3f9a0c41", "needs_you", 1000);
+            socket.send_to(&bytes, daemon).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        })
+        .await
+        .unwrap();
+        task.abort();
+
+        let line = envelope_line(&state).await;
+        let sessions = line["views"]["agents"]["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session["sid"], "3f9a0c41b2d7");
+        assert_eq!(session["device_id"], "dp-3f9a0c41");
+        assert_eq!(session["project"], "deskpane");
+        assert_eq!(session["state"], "needs_you");
+        assert_eq!(session["doing"], "allow Bash?");
+        assert_eq!(session["quiet"], false);
+        assert_eq!(session["running_s"], 0);
+        assert_eq!(session["state_s"], 0);
+        assert_eq!(session["silent_s"], 0);
+        assert!(session["ctx"].is_null());
+        assert_eq!(session["label"], "");
+    }
+
+    #[tokio::test]
+    async fn agent_packet_gets_no_reply() {
+        let (daemon, task) = start_daemon().await;
+        let socket = reporter_socket("127.0.0.1");
+
+        let reply = tokio::task::spawn_blocking(move || {
+            // a valid one, an invalid one, an unknown kind, and an ended for an unknown sid
+            socket
+                .send_to(&agent_bytes("3f9a0c41b2d7", "dp-1", "working", 1), daemon)
+                .unwrap();
+            socket
+                .send_to(&agent_bytes("BAD", "dp-1", "working", 1), daemon)
+                .unwrap();
+            socket
+                .send_to(br#"{"kind":"tasks","v":1}"#, daemon)
+                .unwrap();
+            socket
+                .send_to(&agent_bytes("000000000009", "dp-1", "ended", 1), daemon)
+                .unwrap();
+            read_reply(&socket)
+        })
+        .await
+        .unwrap();
+        task.abort();
+
+        assert_eq!(reply, None);
+    }
+
+    #[tokio::test]
+    async fn ended_packet_removes_the_session_from_the_envelope() {
+        let (daemon, task, state) = start_daemon_with_state().await;
+        let socket = reporter_socket("127.0.0.1");
+
+        tokio::task::spawn_blocking(move || {
+            socket
+                .send_to(&agent_bytes("3f9a0c41b2d7", "dp-1", "done", 1000), daemon)
+                .unwrap();
+            socket
+                .send_to(&agent_bytes("3f9a0c41b2d7", "dp-1", "ended", 2000), daemon)
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        })
+        .await
+        .unwrap();
+        task.abort();
+
+        let line = envelope_line(&state).await;
+        assert!(line["views"]["agents"]["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_agent_packet_is_not_stored() {
+        let (daemon, task, state) = start_daemon_with_state().await;
+        let socket = reporter_socket("127.0.0.1");
+
+        tokio::task::spawn_blocking(move || {
+            // an upper-case sid breaks the sid rule
+            socket
+                .send_to(&agent_bytes("3F9A0C41B2D7", "dp-1", "working", 1), daemon)
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        })
+        .await
+        .unwrap();
+        task.abort();
+
+        let line = envelope_line(&state).await;
+        assert!(line["views"]["agents"]["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn report_and_agent_packets_both_work_on_one_port() {
+        let (daemon, task, state) = start_daemon_with_state().await;
+        let socket = reporter_socket("127.0.0.1");
+
+        let reply = tokio::task::spawn_blocking(move || {
+            send_packet(&socket, daemon, "my-pc", true);
+            let ack = read_reply(&socket);
+            socket
+                .send_to(&agent_bytes("3f9a0c41b2d7", "dp-1", "working", 1), daemon)
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+            ack
+        })
+        .await
+        .unwrap();
+        task.abort();
+
+        assert_eq!(reply, Some(Reply::ack("my-pc")));
+        let line = envelope_line(&state).await;
+        let devices = line["views"]["stats"]["devices"].as_array().unwrap();
+        let sessions = line["views"]["agents"]["sessions"].as_array().unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0]["device_id"], "my-pc");
+        assert_eq!(devices[0]["online"], true);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["state"], "working");
+    }
+
+    #[tokio::test]
+    async fn agent_label_comes_from_the_device_table() {
+        let (daemon, task, state) = start_daemon_with_state().await;
+        let socket = reporter_socket("127.0.0.1");
+
+        tokio::task::spawn_blocking(move || {
+            // the reporter for my-pc has the label "Test"; dp-other has no reporter
+            send_packet(&socket, daemon, "my-pc", false);
+            socket
+                .send_to(&agent_bytes("000000000001", "my-pc", "working", 1), daemon)
+                .unwrap();
+            socket
+                .send_to(&agent_bytes("000000000002", "dp-other", "done", 1), daemon)
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        })
+        .await
+        .unwrap();
+        task.abort();
+
+        let line = envelope_line(&state).await;
+        let sessions = line["views"]["agents"]["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 2);
+        for session in sessions {
+            if session["sid"] == "000000000001" {
+                assert_eq!(session["label"], "Test");
+            } else {
+                assert_eq!(session["label"], "");
+            }
+        }
+    }
+
+    #[test]
+    fn agent_from_same_ip_different_port_is_the_same_owner() {
+        let mut table = AgentTable::new();
+        let now = Instant::now();
+        let first: SocketAddr = "[::ffff:192.168.1.60]:40000".parse().unwrap();
+        let next_hook: SocketAddr = "192.168.1.60:51234".parse().unwrap();
+        let packet = AgentPacket {
+            kind: "agent".to_string(),
+            v: 1,
+            sid: "3f9a0c41b2d7".to_string(),
+            device_id: "dp-1".to_string(),
+            project: String::new(),
+            state: AgentState::Working,
+            doing: String::new(),
+            t: 1,
+            ctx: None,
+            sub: None,
+        };
+
+        store_agent(&mut table, packet.clone(), first, now);
+        let mut later = packet;
+        later.state = AgentState::Done;
+        later.t = 2;
+        let outcome = store_agent(&mut table, later, next_hook, now);
+
+        assert_eq!(outcome, AgentOutcome::Stored);
+    }
+
+    #[test]
+    fn agent_limits_match_the_plan() {
+        assert_eq!(MAX_AGENTS, 16);
+        assert_eq!(MAX_AGENTS_PER_SOURCE, 8);
+        assert_eq!(AGENT_TAKEOVER_AFTER, Duration::from_secs(120));
+        assert_eq!(AGENT_REORDER_WINDOW, Duration::from_secs(5));
+        assert_eq!(AGENT_QUIET_AFTER, Duration::from_secs(600));
+        assert_eq!(AGENT_FORGET_AFTER, Duration::from_secs(4 * 3600));
+    }
+
+    // ---- agent log lines (T-045) ----
+
+    fn lan_source() -> std::net::IpAddr {
+        "192.168.1.60".parse().unwrap()
+    }
+
+    #[test]
+    fn new_session_line_is_always_logged() {
+        // the caps already bound how many new sessions there can be
+        let line = agent_outcome_line(
+            &AgentOutcome::Created { evicted: None },
+            "3f9a0c41b2d7",
+            lan_source(),
+        );
+        assert_eq!(
+            line,
+            AgentLogLine::Always(
+                "daemon: new agent session 3f9a0c41b2d7 from 192.168.1.60".to_string()
+            )
+        );
+        let evicting = agent_outcome_line(
+            &AgentOutcome::Created {
+                evicted: Some("000000000001".to_string()),
+            },
+            "3f9a0c41b2d7",
+            lan_source(),
+        );
+        match evicting {
+            AgentLogLine::Always(text) => assert!(text.contains("evicted 000000000001")),
+            other => panic!("expected Always, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refusals_are_limited_and_normal_outcomes_are_silent() {
+        for outcome in [
+            AgentOutcome::NotOwner,
+            AgentOutcome::SourceFull,
+            AgentOutcome::TableFull,
+        ] {
+            match agent_outcome_line(&outcome, "3f9a0c41b2d7", lan_source()) {
+                AgentLogLine::Limited(_) => {}
+                other => panic!("expected Limited for {outcome:?}, got {other:?}"),
+            }
+        }
+        for outcome in [
+            AgentOutcome::Stored,
+            AgentOutcome::Removed,
+            AgentOutcome::Ignored,
+            AgentOutcome::OutOfOrder,
+        ] {
+            assert_eq!(
+                agent_outcome_line(&outcome, "3f9a0c41b2d7", lan_source()),
+                AgentLogLine::Silent
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bad_report_still_gets_no_reply_and_is_not_stored() {
+        let (daemon, task, state) = start_daemon_with_state().await;
+        let socket = reporter_socket("127.0.0.1");
+
+        let reply = tokio::task::spawn_blocking(move || {
+            socket
+                .send_to(br#"{"device_id":"my-pc","cpu_pct":"evil"}"#, daemon)
+                .unwrap();
+            read_reply(&socket)
+        })
+        .await
+        .unwrap();
+        task.abort();
+
+        assert_eq!(reply, None);
+        let line = envelope_line(&state).await;
+        assert!(line["views"]["stats"]["devices"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 }
