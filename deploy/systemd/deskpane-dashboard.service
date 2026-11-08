@@ -12,6 +12,8 @@ Group=deskpane
 # video for /dev/fb1, input for the touch device
 SupplementaryGroups=video input
 Environment=SOCKET_PATH=/run/deskpane/daemon.sock
+# optional character pack (install.sh --characters), root owned, read only here
+Environment=CHARACTERS_DIR=/var/lib/deskpane/characters
 # the install directory is read-only for this user, so do not try to write .pyc files
 Environment=PYTHONDONTWRITEBYTECODE=1
 WorkingDirectory=/opt/deskpane/current/dashboard

@@ -2,6 +2,7 @@
 Plain unittest, no pygame needed. Run from the repo root with:
     python3 -m unittest discover -s pi/tests
 """
+import json
 import os
 import sys
 import tempfile
@@ -134,6 +135,449 @@ class VersionPositionTest(unittest.TestCase):
         x, y = layout.version_position(HEIGHT, SUMMARY_H)
         self.assertEqual(x, 8)
         self.assertEqual(y + SUMMARY_H, HEIGHT - 8)
+
+
+
+def agent(sid, state="working", state_s=10, project="proj", quiet=False, **extra):
+    """One session as the daemon's envelope sends it."""
+    session = {
+        "sid": sid, "device_id": "dp-3f9a0c41", "label": "my-pc", "project": project,
+        "state": state, "doing": "Bash", "running_s": 600, "state_s": state_s,
+        "quiet": quiet, "ctx": None,
+    }
+    session.update(extra)
+    return session
+
+
+class SortAgentsTest(unittest.TestCase):
+    def sids(self, sessions):
+        return [s["sid"] for s in layout.sort_agents(sessions)]
+
+    def test_sort_puts_needs_you_first_longest_waiting_first(self):
+        sessions = [
+            agent("w1", "working"),
+            agent("n-short", "needs_you", state_s=5),
+            agent("n-long", "needs_you", state_s=90),
+        ]
+        self.assertEqual(self.sids(sessions), ["n-long", "n-short", "w1"])
+
+    def test_sort_puts_error_after_needs_you_before_working(self):
+        sessions = [
+            agent("w", "working"),
+            agent("e-old", "error", state_s=300),
+            agent("e-new", "error", state_s=3),
+            agent("n", "needs_you"),
+        ]
+        self.assertEqual(self.sids(sessions), ["n", "e-new", "e-old", "w"])
+
+    def test_sort_puts_dim_done_last(self):
+        sessions = [
+            agent("d-dim", "done", state_s=layout.DONE_DIM_AFTER_S + 1),
+            agent("d-new", "done", state_s=10),
+            agent("d-older", "done", state_s=100),
+            agent("i", "idle"),
+            agent("w", "working"),
+        ]
+        self.assertEqual(self.sids(sessions), ["w", "i", "d-new", "d-older", "d-dim"])
+
+    def test_sort_is_stable_by_project_within_a_group(self):
+        sessions = [agent("b", "working", project="zeta"), agent("a", "working", project="alpha")]
+        self.assertEqual(self.sids(sessions), ["a", "b"])
+
+    def test_sort_puts_unknown_states_at_the_end(self):
+        sessions = [agent("x", "dancing"), agent("d", "done")]
+        self.assertEqual(self.sids(sessions), ["d", "x"])
+
+    def test_sort_survives_missing_fields(self):
+        self.assertEqual(len(layout.sort_agents([{"sid": "a"}, {"state": "done", "state_s": None}])), 2)
+
+
+class AgentStyleTest(unittest.TestCase):
+    def test_needs_you_is_amber_filled_with_alert_icon(self):
+        style = layout.agent_style("needs_you", False, 3)
+        self.assertEqual((style["color"], style["icon"], style["word"]), ("amber", "alert", "NEEDS YOU"))
+        self.assertTrue(style["fill"])
+
+    def test_working_is_blue_pulse(self):
+        style = layout.agent_style("working", False, 3)
+        self.assertEqual((style["color"], style["icon"], style["word"]), ("blue", "pulse", "WORKING"))
+        self.assertFalse(style["fill"])
+
+    def test_agent_style_quiet_working_is_grey_with_question_mark(self):
+        style = layout.agent_style("working", True, 900)
+        self.assertEqual((style["color"], style["icon"], style["word"]), ("greyblue", "question", "QUIET"))
+
+    def test_agent_style_error_is_red_with_x(self):
+        style = layout.agent_style("error", False, 3)
+        self.assertEqual((style["color"], style["icon"], style["word"]), ("red", "cross", "ERROR"))
+        self.assertFalse(style["fill"])
+
+    def test_done_is_green_check_and_dims_after_30_minutes(self):
+        fresh = layout.agent_style("done", False, 60)
+        old = layout.agent_style("done", False, layout.DONE_DIM_AFTER_S + 1)
+        self.assertEqual((fresh["color"], fresh["icon"], fresh["word"]), ("green", "check", "DONE"))
+        self.assertFalse(fresh["dim"])
+        self.assertTrue(old["dim"])
+
+    def test_idle_is_grey_open_circle_ready(self):
+        style = layout.agent_style("idle", False, 3)
+        self.assertEqual((style["color"], style["icon"], style["word"]), ("grey", "circle", "READY"))
+
+    def test_quiet_only_applies_to_working(self):
+        self.assertEqual(layout.agent_style("needs_you", True, 3)["word"], "NEEDS YOU")
+        self.assertEqual(layout.agent_style("error", True, 3)["word"], "ERROR")
+
+    def test_unknown_state_is_grey_with_a_fixed_word(self):
+        style = layout.agent_style("\x1b[2J", False, 3)
+        self.assertEqual((style["color"], style["word"]), ("grey", "?"))
+
+    def test_ended_ghost_is_grey_ended(self):
+        self.assertEqual(layout.agent_style("ended", False, 0)["word"], "ENDED")
+
+
+class AgentPagesTest(unittest.TestCase):
+    def test_agent_pages_split_by_five(self):
+        self.assertEqual(layout.agent_pages(0), [])
+        self.assertEqual(layout.agent_pages(1), [(0, 1)])
+        self.assertEqual(layout.agent_pages(5), [(0, 5)])
+        self.assertEqual(layout.agent_pages(6), [(0, 5), (5, 6)])
+        self.assertEqual(layout.agent_pages(16), [(0, 5), (5, 10), (10, 15), (15, 16)])
+
+    def test_page_ring_order_overview_agents_devices(self):
+        ring = layout.page_ring(2, 7)
+        self.assertEqual(ring, [
+            ("overview", None), ("agents", (0, 5)), ("agents", (5, 7)), ("device", 0), ("device", 1),
+        ])
+
+    def test_page_ring_without_sessions_has_no_agents_page(self):
+        self.assertEqual(layout.page_ring(1, 0), [("overview", None), ("device", 0)])
+
+
+class AgentRowsLayoutTest(unittest.TestCase):
+    def test_single_session_gets_card_layout(self):
+        rects = layout.agent_rows_layout(WIDTH, HEIGHT, 1, 40, 24)
+        self.assertEqual(rects, [(0, 40, WIDTH, HEIGHT - 40 - 24)])
+
+    def test_rows_fit_between_header_and_dots_for_1_to_5(self):
+        for n in range(1, 6):
+            with self.subTest(rows=n):
+                rects = layout.agent_rows_layout(WIDTH, HEIGHT, n, 40, 24)
+                self.assertEqual(len(rects), n)
+                self.assertEqual(rects[0][1], 40)
+                last = rects[-1]
+                self.assertLessEqual(last[1] + last[3], HEIGHT - 24)
+                for (x, y, w, h), (_, next_y, _, _) in zip(rects, rects[1:]):
+                    self.assertEqual(y + h, next_y)
+
+    def test_row_heights_are_64_up_to_4_rows_and_51_for_5(self):
+        self.assertEqual({r[3] for r in layout.agent_rows_layout(WIDTH, HEIGHT, 2, 40, 24)}, {64})
+        self.assertEqual({r[3] for r in layout.agent_rows_layout(WIDTH, HEIGHT, 4, 40, 24)}, {64})
+        self.assertEqual({r[3] for r in layout.agent_rows_layout(WIDTH, HEIGHT, 5, 40, 24)}, {51})
+
+    def test_no_rows_is_empty(self):
+        self.assertEqual(layout.agent_rows_layout(WIDTH, HEIGHT, 0, 40, 24), [])
+
+
+class FmtElapsedTest(unittest.TestCase):
+    def test_fmt_elapsed_units(self):
+        self.assertEqual(layout.fmt_elapsed(0), "0s")
+        self.assertEqual(layout.fmt_elapsed(45), "45s")
+        self.assertEqual(layout.fmt_elapsed(59), "59s")
+        self.assertEqual(layout.fmt_elapsed(60), "1m")
+        self.assertEqual(layout.fmt_elapsed(12 * 60 + 30), "12m")
+        self.assertEqual(layout.fmt_elapsed(3 * 3600 + 59), "3h")
+        self.assertEqual(layout.fmt_elapsed(2 * 86400 + 5), "2d")
+
+    def test_fmt_elapsed_bad_input_is_0s(self):
+        self.assertEqual(layout.fmt_elapsed(-5), "0s")
+        self.assertEqual(layout.fmt_elapsed(None), "0s")
+        self.assertEqual(layout.fmt_elapsed("12"), "0s")
+
+
+class AgentSummaryTest(unittest.TestCase):
+    def test_agent_summary_none_when_empty(self):
+        self.assertIsNone(layout.agent_summary([]))
+
+    def test_agent_summary_counts_error_and_drops_zero_parts(self):
+        sessions = [
+            agent("a", "needs_you"), agent("b", "error"), agent("c", "working"), agent("d", "working"),
+        ]
+        parts = layout.agent_summary(sessions)
+        self.assertEqual(parts, [
+            ("needs_you", "1 needs you"), ("error", "1 error"), ("working", "2 working"),
+        ])
+
+    def test_agent_summary_includes_done_and_ready(self):
+        parts = layout.agent_summary([agent("a", "done"), agent("b", "idle"), agent("c", "idle")])
+        self.assertEqual(parts, [("done", "1 done"), ("idle", "2 ready")])
+
+    def test_agent_summary_ignores_ghosts(self):
+        self.assertIsNone(layout.agent_summary([agent("a", "done", ghost=True)]))
+
+
+class AgentLineTest(unittest.TestCase):
+    def test_line_two_is_label_dot_doing(self):
+        self.assertEqual(layout.agent_line2(agent("a", doing="allow Bash?")), "my-pc \u00b7 allow Bash?")
+
+    def test_line_two_uses_device_id_without_a_label(self):
+        self.assertEqual(layout.agent_line2(agent("a", label="", doing="")), "dp-3f9a0c41")
+
+    def test_quiet_line_two_says_no_news(self):
+        line = layout.agent_line2(agent("a", "working", quiet=True, state_s=3600, silent_s=720))
+        self.assertEqual(line, "my-pc \u00b7 no news for 12m")
+
+    def test_quiet_line_two_falls_back_to_state_s_without_silent_s(self):
+        line = layout.agent_line2(agent("a", "working", quiet=True, state_s=720))
+        self.assertEqual(line, "my-pc \u00b7 no news for 12m")
+
+    def test_quiet_line_two_bad_silent_s_falls_back_to_state_s(self):
+        for bad in (None, "720", True):
+            with self.subTest(bad=bad):
+                line = layout.agent_line2(agent("a", "working", quiet=True, state_s=720, silent_s=bad))
+                self.assertEqual(line, "my-pc \u00b7 no news for 12m")
+
+    def test_project_title_shows_question_mark_when_hidden(self):
+        self.assertEqual(layout.agent_title(agent("a", project="")), "?")
+        self.assertEqual(layout.agent_title(agent("a", project="deskpane")), "deskpane")
+
+
+class FitTextTest(unittest.TestCase):
+    @staticmethod
+    def measure(text):
+        # every character is 10 px wide
+        return 10 * len(text)
+
+    def test_fit_text_keeps_short_text(self):
+        self.assertEqual(layout.fit_text("abc", 30, self.measure), "abc")
+
+    def test_fit_text_ellipsises_with_fake_measure(self):
+        result = layout.fit_text("abcdefghij", 50, self.measure)
+        self.assertEqual(result, "abcd" + layout.ELLIPSIS)
+        self.assertLessEqual(self.measure(result), 50)
+
+    def test_fit_text_too_narrow_for_anything_is_empty(self):
+        self.assertEqual(layout.fit_text("abcdef", 5, self.measure), "")
+
+    def test_fit_text_empty_and_none(self):
+        self.assertEqual(layout.fit_text("", 50, self.measure), "")
+        self.assertEqual(layout.fit_text(None, 50, self.measure), "")
+
+
+class FocusTest(unittest.TestCase):
+    def test_focus_only_on_new_transition_into_needs_you(self):
+        self.assertTrue(layout.should_focus_agents({"a": "working"}, {"a": "needs_you"}, 0, 100))
+        # still amber: no second jump
+        self.assertFalse(layout.should_focus_agents({"a": "needs_you"}, {"a": "needs_you"}, 0, 100))
+        # a new session that arrives waiting also counts
+        self.assertTrue(layout.should_focus_agents({}, {"b": "needs_you"}, 0, 100))
+        self.assertFalse(layout.should_focus_agents({"a": "needs_you"}, {"a": "working"}, 0, 100))
+
+    def test_focus_not_triggered_by_error(self):
+        self.assertFalse(layout.should_focus_agents({"a": "working"}, {"a": "error"}, 0, 100))
+
+    def test_focus_suppressed_after_recent_tap(self):
+        self.assertFalse(layout.should_focus_agents({"a": "working"}, {"a": "needs_you"}, 95, 100))
+        self.assertTrue(layout.should_focus_agents({"a": "working"}, {"a": "needs_you"}, 90, 100))
+
+    def test_focus_not_on_the_first_line(self):
+        self.assertFalse(layout.should_focus_agents(None, {"a": "needs_you"}, 0, 100))
+
+    def test_focus_with_no_tap_yet(self):
+        self.assertTrue(layout.should_focus_agents({"a": "idle"}, {"a": "needs_you"}, None, 5))
+
+
+class ParseSocketLineTest(unittest.TestCase):
+    def test_parse_socket_line_envelope_and_legacy_array(self):
+        devices = [{"device_id": "dp-1", "online": True}]
+        sessions = [agent("3f9a0c41b2d7")]
+        envelope = {"v": 1, "views": {"stats": {"devices": devices}, "agents": {"sessions": sessions}}}
+        self.assertEqual(layout.parse_socket_line(envelope), (devices, sessions))
+        self.assertEqual(layout.parse_socket_line(devices), (devices, []))
+
+    def test_parse_socket_line_real_daemon_shape(self):
+        # the exact line the Rust daemon sends (T-041), with silent_s
+        line = (
+            '{"v":1,"views":{"stats":{"devices":[{"device_id":"dp-1","online":true}]},'
+            '"agents":{"sessions":[{"sid":"3f9a0c41b2d7","device_id":"dp-3f9a0c41","label":"my-pc",'
+            '"project":"deskpane","state":"working","doing":"Bash","running_s":1520,"state_s":34,'
+            '"silent_s":700,"quiet":true,"ctx":null}]}}}'
+        )
+        devices, sessions = layout.parse_socket_line(json.loads(line))
+        self.assertEqual(devices, [{"device_id": "dp-1", "online": True}])
+        self.assertEqual(len(sessions), 1)
+        session = sessions[0]
+        self.assertEqual(sorted(session), sorted([
+            "sid", "device_id", "label", "project", "state", "doing",
+            "running_s", "state_s", "silent_s", "quiet", "ctx",
+        ]))
+        self.assertEqual(session["silent_s"], 700)
+        self.assertIsNone(session["ctx"])
+        self.assertEqual(layout.agent_line2(session), "my-pc \u00b7 no news for 11m")
+
+    def test_envelope_without_agents_view_has_no_sessions(self):
+        envelope = {"v": 1, "views": {"stats": {"devices": []}}}
+        self.assertEqual(layout.parse_socket_line(envelope), ([], []))
+
+    def test_envelope_ignores_later_views(self):
+        envelope = {"v": 1, "views": {"stats": {"devices": []}, "agents": {"sessions": []}, "tasks": {}}}
+        self.assertEqual(layout.parse_socket_line(envelope), ([], []))
+
+    def test_unknown_version_or_shape_is_none(self):
+        for obj in [{"v": 2, "views": {}}, {"views": {}}, "hello", 42, None, {"v": 1, "views": []}]:
+            with self.subTest(obj=obj):
+                self.assertIsNone(layout.parse_socket_line(obj))
+
+    def test_non_dict_items_are_dropped(self):
+        envelope = {"v": 1, "views": {"stats": {"devices": [1, {"device_id": "a"}]},
+                                      "agents": {"sessions": ["x", {"sid": "b"}]}}}
+        self.assertEqual(layout.parse_socket_line(envelope), ([{"device_id": "a"}], [{"sid": "b"}]))
+        self.assertEqual(layout.parse_socket_line([None, {"device_id": "a"}]), ([{"device_id": "a"}], []))
+
+    def test_wrong_inner_types_become_empty(self):
+        envelope = {"v": 1, "views": {"stats": {"devices": "x"}, "agents": {"sessions": {}}}}
+        self.assertEqual(layout.parse_socket_line(envelope), ([], []))
+
+
+class OverviewAgentsLineTest(unittest.TestCase):
+    def test_agents_line_sits_below_the_summary(self):
+        result = layout.overview_layout(WIDTH, HEIGHT, CLOCK_H, DATE_H, SUMMARY_H, agents_h=SUMMARY_H)
+        self.assertLessEqual(result["summary_y"] + SUMMARY_H, result["agents_y"])
+        version_x, version_y = layout.version_position(HEIGHT, SUMMARY_H)
+        self.assertLessEqual(result["agents_y"] + SUMMARY_H, version_y)
+
+    def test_block_stays_centred_with_the_agents_line(self):
+        result = layout.overview_layout(WIDTH, HEIGHT, CLOCK_H, DATE_H, SUMMARY_H, agents_h=SUMMARY_H)
+        bottom = result["agents_y"] + SUMMARY_H
+        self.assertLessEqual(abs(result["clock_y"] - (HEIGHT - bottom)), 1)
+
+    def test_no_agents_line_keeps_the_old_layout(self):
+        old = layout.overview_layout(WIDTH, HEIGHT, CLOCK_H, DATE_H, SUMMARY_H)
+        self.assertNotIn("agents_y", old)
+
+
+
+class PageKeysTest(unittest.TestCase):
+    def test_page_keys_are_stable_names(self):
+        ring = layout.page_ring(2, 7)
+        devices = [{"device_id": "dp-a"}, {"device_id": "dp-b"}]
+        self.assertEqual(layout.page_keys(ring, devices), [
+            ("overview", None), ("agents", 0), ("agents", 1), ("device", "dp-a"), ("device", "dp-b"),
+        ])
+
+    def test_fallback_for_a_vanished_agents_page_is_the_last_agents_page(self):
+        keys = [("overview", None), ("agents", 0), ("device", "dp-a")]
+        self.assertEqual(layout.fallback_key(("agents", 2), keys), ("agents", 0))
+
+    def test_fallback_otherwise_is_the_overview(self):
+        keys = [("overview", None), ("device", "dp-a")]
+        self.assertEqual(layout.fallback_key(("agents", 0), keys), ("overview", None))
+        self.assertEqual(layout.fallback_key(("device", "dp-gone"), keys), ("overview", None))
+
+
+class StepFocusTest(unittest.TestCase):
+    """step_focus: the focus jump to the agents page as a pure state machine."""
+
+    KEYS = [("overview", None), ("agents", 0), ("device", "dp-a"), ("device", "dp-b")]
+
+    def start(self, page_key=("device", "dp-a")):
+        return layout.focus_state(page_key)
+
+    def line(self, state, prev, new, now, last_tap=None, blocked=False):
+        event = {"kind": "line", "prev_states": prev, "new_states": new,
+                 "last_tap": last_tap, "blocked": blocked}
+        return layout.step_focus(state, event, now)
+
+    def tick(self, state, now, keys=None):
+        return layout.step_focus(state, {"kind": "tick", "keys": keys or self.KEYS}, now)
+
+    def tap(self, state, now, keys=None, advance=True):
+        return layout.step_focus(state, {"kind": "tap", "keys": keys or self.KEYS, "advance": advance}, now)
+
+    def test_needs_you_jumps_to_the_first_agents_page(self):
+        state = self.line(self.start(), {"a": "working"}, {"a": "needs_you"}, 100)
+        self.assertEqual(state["page_key"], ("agents", 0))
+        self.assertEqual(state["focus_until"], 100 + layout.FOCUS_FOR_S)
+        self.assertEqual(state["focus_return"], ("device", "dp-a"))
+
+    def test_focus_ends_and_returns_to_the_previous_page(self):
+        state = self.line(self.start(), {"a": "working"}, {"a": "needs_you"}, 100)
+        state = self.tick(state, 100 + layout.FOCUS_FOR_S - 1)
+        self.assertEqual(state["page_key"], ("agents", 0))
+        state = self.tick(state, 100 + layout.FOCUS_FOR_S)
+        self.assertEqual(state["page_key"], ("device", "dp-a"))
+        self.assertEqual(state["focus_until"], 0.0)
+        self.assertIsNone(state["focus_return"])
+
+    def test_a_tap_ends_focus(self):
+        state = self.line(self.start(), {"a": "working"}, {"a": "needs_you"}, 100)
+        state = self.tap(state, 105)
+        self.assertEqual(state["focus_until"], 0.0)
+        self.assertIsNone(state["focus_return"])
+        # the tap moves on from the agents page as any tap does
+        self.assertEqual(state["page_key"], ("device", "dp-a"))
+        # and no return jump later
+        self.assertEqual(self.tick(state, 200)["page_key"], ("device", "dp-a"))
+
+    def test_a_tap_that_does_not_advance_still_ends_focus(self):
+        state = self.line(self.start(), {"a": "working"}, {"a": "needs_you"}, 100)
+        state = self.tap(state, 105, advance=False)
+        self.assertEqual(state["page_key"], ("agents", 0))
+        self.assertEqual(state["focus_until"], 0.0)
+
+    def test_tap_wraps_around_the_ring(self):
+        state = self.tap(self.start(("device", "dp-b")), 10)
+        self.assertEqual(state["page_key"], ("overview", None))
+
+    def test_second_needs_you_during_focus_keeps_the_original_return_page(self):
+        state = self.line(self.start(), {"a": "working"}, {"a": "needs_you"}, 100)
+        state = self.line(state, {"a": "needs_you", "b": "working"}, {"a": "needs_you", "b": "needs_you"}, 110)
+        self.assertEqual(state["focus_return"], ("device", "dp-a"))
+        self.assertEqual(state["focus_until"], 110 + layout.FOCUS_FOR_S)
+        state = self.tick(state, 110 + layout.FOCUS_FOR_S)
+        self.assertEqual(state["page_key"], ("device", "dp-a"))
+
+    def test_line_on_the_frame_after_expiry_keeps_the_original_return_page(self):
+        state = self.line(self.start(), {"a": "working"}, {"a": "needs_you"}, 100)
+        # the line arrives after focus_until passed, before any tick has run
+        late = 100 + layout.FOCUS_FOR_S + 0.5
+        state = self.line(state, {"a": "needs_you", "b": "working"}, {"a": "needs_you", "b": "needs_you"}, late)
+        self.assertEqual(state["focus_return"], ("device", "dp-a"))
+        self.assertEqual(state["focus_until"], late + layout.FOCUS_FOR_S)
+        state = self.tick(state, late + layout.FOCUS_FOR_S)
+        self.assertEqual(state["page_key"], ("device", "dp-a"))
+
+    def test_return_page_gone_falls_back(self):
+        state = self.line(self.start(), {"a": "working"}, {"a": "needs_you"}, 100)
+        keys = [("overview", None), ("agents", 0), ("device", "dp-b")]
+        state = self.tick(state, 100 + layout.FOCUS_FOR_S, keys=keys)
+        self.assertEqual(state["page_key"], ("overview", None))
+        self.assertIsNone(state["focus_return"])
+
+    def test_current_page_gone_falls_back_without_focus(self):
+        keys = [("overview", None), ("agents", 0)]
+        self.assertEqual(self.tick(self.start(("agents", 3)), 5, keys=keys)["page_key"], ("agents", 0))
+
+    def test_no_focus_on_error(self):
+        state = self.line(self.start(), {"a": "working"}, {"a": "error"}, 100)
+        self.assertEqual(state["page_key"], ("device", "dp-a"))
+        self.assertEqual(state["focus_until"], 0.0)
+
+    def test_no_focus_on_the_first_socket_line(self):
+        state = self.line(self.start(), None, {"a": "needs_you"}, 100)
+        self.assertEqual(state["page_key"], ("device", "dp-a"))
+        self.assertEqual(state["focus_until"], 0.0)
+
+    def test_no_focus_right_after_a_tap_or_while_blocked(self):
+        recent = self.line(self.start(), {"a": "working"}, {"a": "needs_you"}, 100, last_tap=95)
+        self.assertEqual(recent["focus_until"], 0.0)
+        blocked = self.line(self.start(), {"a": "working"}, {"a": "needs_you"}, 100, blocked=True)
+        self.assertEqual(blocked["focus_until"], 0.0)
+
+    def test_step_focus_does_not_change_its_input(self):
+        state = self.start()
+        before = dict(state)
+        self.line(state, {"a": "working"}, {"a": "needs_you"}, 100)
+        self.assertEqual(state, before)
 
 
 if __name__ == "__main__":
