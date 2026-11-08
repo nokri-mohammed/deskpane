@@ -1,8 +1,11 @@
 """Dashboard: reads the daemon's device-status broadcast over a Unix
 socket and renders it onto the Pi's framebuffer touchscreen, in the
 animated ring-gauge style of the original single-device prototype.
-Page 0 is an overview (clock, date, device count, version); pages after
-that are one per device. Tap the screen (see touch.py) to cycle pages.
+Page 0 is an overview (clock, date, device count, agents line, version);
+then the agents pages (one per 5 Claude Code sessions, none without
+sessions), then one page per device. Tap the screen (see touch.py) to cycle
+pages. With a character pack installed (CHARACTERS_DIR), sessions show a
+pixel-art character instead of the built-in icon.
 """
 import json
 import math
@@ -16,11 +19,33 @@ import traceback
 
 import pygame
 
+import charpack
+import sprites
 from fb_display import FrameBuffer, detect_touchscreen_fb
-from layout import overview_layout, read_version, version_position, version_text
+from layout import (
+    agent_line2,
+    agent_rows_layout,
+    agent_style,
+    agent_summary,
+    agent_title,
+    fit_text,
+    fmt_elapsed,
+    focus_state,
+    overview_layout,
+    page_keys,
+    page_ring,
+    parse_socket_line,
+    read_version,
+    sort_agents,
+    step_focus,
+    version_position,
+    version_text,
+)
 from touch import TouchWatcher
 
 SOCKET_PATH = os.environ.get("SOCKET_PATH", "/run/deskpane/daemon.sock")
+# installed by install.sh --characters; root owned, read only for us
+CHARACTERS_DIR = os.environ.get("CHARACTERS_DIR", "/var/lib/deskpane/characters")
 FB_PATH = os.environ.get("FB_PATH") or detect_touchscreen_fb() or "/dev/fb1"
 
 # A full 320x480 RGB565 frame (307KB) takes ~150ms to physically transfer
@@ -28,6 +53,9 @@ FB_PATH = os.environ.get("FB_PATH") or detect_touchscreen_fb() or "/dev/fb1"
 # mid-transfer and blends two frames together (the "ghosted/obfuscated"
 # look) -- this is a dashboard, not an animation, so a low FPS costs nothing.
 FPS = 3
+# 5 fps only while characters animate on the agents page (plan decision 3);
+# 200 ms per frame is still above the 150 ms SPI transfer
+AGENTS_FPS = charpack.CHAR_FPS
 TRANSITION_SECS = 0.35
 # repeat the same drawing error in the log at most once per this many seconds
 DRAW_ERROR_LOG_EVERY_SECS = 30
@@ -41,6 +69,138 @@ ACCENT = (64, 209, 171)
 WARN = (235, 180, 64)
 CRIT = (232, 93, 93)
 RING_BG = (45, 48, 58)
+
+# agents page geometry: header, page dots, state bar, icon and character cells
+AGENT_HEADER_H = 40
+AGENT_FOOTER_H = 24
+AGENT_BAR_W = 8
+AGENT_ICON_CELL = 36
+AGENT_ICON_R = 11
+# with a pack: the 48 px character sits at the left of an 80 px cell and
+# its 32 px emote to the right of the head, so the bubble never covers it
+AGENT_CHAR_CELL = 80
+AGENT_CHAR_PAD = 4
+# the emote may overlap this much of the character frame's empty right edge
+AGENT_EMOTE_TUCK = 8
+# gap between the icon or character and the text column
+AGENT_TEXT_GAP = 10
+# gap between line 1 and line 2 of a row
+AGENT_LINE_GAP = 3
+# single card: the art cell and the gap between the head and the bubble
+AGENT_ART_W = 160
+AGENT_CARD_PAD = 12
+AGENT_EMOTE_GAP = 4
+# agent state colours by the names layout.agent_style returns
+AGENT_COLORS = {
+    "amber": WARN,
+    "blue": (92, 152, 236),
+    "greyblue": (112, 128, 152),
+    "green": (96, 200, 112),
+    "red": CRIT,
+    "grey": SUBTEXT,
+}
+# text on the amber needs-you fill
+DARK_TEXT = (28, 22, 8)
+# secondary text on the amber fill: tinted from the amber, still 5:1 on it
+AMBER_SUBTEXT = (88, 62, 16)
+# the state bar of a needs-you row, a shade of the fill instead of a black notch
+AMBER_BAR = (176, 128, 32)
+ROW_LINE = (40, 42, 50)
+
+
+# pygame.font.Font(None, n) draws its built-in font at n * 0.6875; the
+# freetype fonts below use the same factor so every size stays as it was
+DEFAULT_FONT_SCALE = 0.6875
+FONT_SIZES = {"clock": 120, "huge": 56, "big": 40, "mid": 26, "small": 20, "tiny": 16}
+
+
+# below this pixel size, text is drawn 4x larger and shrunk with an average
+# filter: no hinting at all, so letters keep their real shapes and spacing
+SUPERSAMPLE_BELOW_PX = 24
+SUPERSAMPLE = 4
+TEXT_CACHE_MAX = 256
+# fonts at or above this pixel size keep a smaller cache
+BIG_TEXT_PX = 24
+BIG_TEXT_CACHE_MAX = 32
+
+
+class TextFont:
+    """The built-in font (freesansbold.ttf, shipped inside pygame) drawn
+    with pygame.freetype instead of pygame.font. pygame.font hints the bold
+    glyphs so hard at small sizes that letters drift apart ("homel ab") and
+    an "i" looks like an "l"; freetype's own hinter closes the "c" into an
+    "o" at the same sizes. So small sizes are drawn unhinted (4x, then
+    averaged down) with kerning, and big sizes, where hinting is harmless,
+    directly. It keeps the calls the pages use: render(text, antialias,
+    color) and size(text); every render is one line tall, so text lines up
+    the same way it did with pygame.font."""
+
+    def __init__(self, size):
+        px = size * DEFAULT_FONT_SCALE
+        self._ss = SUPERSAMPLE if px < SUPERSAMPLE_BELOW_PX else 1
+        self._font = pygame.freetype.Font(None, px * self._ss)
+        self._font.kerning = True
+        self._font.pad = False
+        self._ascent = self._font.get_sized_ascender()
+        span = self._ascent - self._font.get_sized_descender()
+        self._height = -(-span // self._ss)
+        self._cache = {}
+        self._boxes = {}
+        # big fonts (the clock) make large surfaces, so they keep fewer
+        self._cache_max = BIG_TEXT_CACHE_MAX if px >= BIG_TEXT_PX else TEXT_CACHE_MAX
+
+    def _box(self, text):
+        # fit_text measures once per dropped character, so boxes are cached
+        box = self._boxes.get(text)
+        if box is not None:
+            return box
+        rect = self._font.get_rect(text)
+        left = max(0, rect.x)
+        box = left, rect.y, max(1, -(-(left + rect.width) // self._ss))
+        if len(self._boxes) >= self._cache_max:
+            self._boxes.clear()
+        self._boxes[text] = box
+        return box
+
+    def size(self, text):
+        if not text:
+            return 1, self._height
+        return self._box(text)[2], self._height
+
+    def get_height(self):
+        return self._height
+
+    def render(self, text, antialias, color):
+        if not text:
+            return pygame.Surface((1, self._height), pygame.SRCALPHA)
+        key = (text, tuple(color), bool(antialias))
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        left, top, width = self._box(text)
+        ss = self._ss
+        surface = pygame.Surface((width * ss, self._height * ss), pygame.SRCALPHA)
+        self._font.antialiased = bool(antialias)
+        self._font.render_to(surface, (left, self._ascent - top), text, color)
+        if ss > 1:
+            surface = pygame.transform.smoothscale(surface, (width, self._height))
+        # the clock and elapsed times change, so the cache is simply reset when full
+        if len(self._cache) >= self._cache_max:
+            self._cache.clear()
+        self._cache[key] = surface
+        return surface
+
+
+def load_fonts():
+    """One font per role. Falls back to pygame.font (the old look) if
+    pygame.freetype is missing, so the dashboard always starts."""
+    try:
+        import pygame.freetype
+        pygame.freetype.init()
+        return {name: TextFont(size) for name, size in FONT_SIZES.items()}
+    except Exception as error:
+        print(f"dashboard: freetype fonts unavailable, pygame.font instead: {error!r}", file=sys.stderr, flush=True)
+        return {name: pygame.font.Font(None, size) for name, size in FONT_SIZES.items()}
 
 
 def level_color(pct):
@@ -59,6 +219,9 @@ class SocketReader:
         self._path = path
         self._lock = threading.Lock()
         self._devices = []
+        self._sessions = []
+        # counts good lines, so the main loop sees when a new one arrived
+        self._line_no = 0
         self._connected = False
         threading.Thread(target=self._loop, daemon=True).start()
 
@@ -74,11 +237,16 @@ class SocketReader:
                     if not line:
                         continue
                     try:
-                        devices = json.loads(line)
+                        decoded = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    # the envelope, or a legacy bare array; anything else is skipped
+                    parsed = parse_socket_line(decoded)
+                    if parsed is None:
+                        continue
                     with self._lock:
-                        self._devices = devices
+                        self._devices, self._sessions = parsed
+                        self._line_no += 1
             except OSError:
                 pass
             self._connected = False
@@ -88,6 +256,16 @@ class SocketReader:
     def devices(self):
         with self._lock:
             return list(self._devices)
+
+    @property
+    def sessions(self):
+        with self._lock:
+            return list(self._sessions)
+
+    @property
+    def line_no(self):
+        with self._lock:
+            return self._line_no
 
     @property
     def connected(self):
@@ -245,7 +423,33 @@ def draw_pulse_dot(surface, pos, t0, now):
     pygame.draw.circle(surface, color, pos, 4)
 
 
-def draw_overview(surface, fonts, devices, connected, t0, now, width, height, version):
+def render_agents_line(fonts, parts):
+    """The overview's agents line, "Agents: 1 needs you · 1 error · 2
+    working", as one surface: needs you in amber, error in red."""
+    font = fonts["tiny"]
+    pieces = [("Agents: ", SUBTEXT)]
+    for index, (state, text) in enumerate(parts):
+        if index > 0:
+            pieces.append(("  \u00b7  ", SUBTEXT))
+        if state == "needs_you":
+            color = WARN
+        elif state == "error":
+            color = CRIT
+        else:
+            color = SUBTEXT
+        pieces.append((text, color))
+    rendered = [font.render(text, True, color) for text, color in pieces]
+    width = sum(r.get_width() for r in rendered)
+    height = max(r.get_height() for r in rendered)
+    line = pygame.Surface((width, height), pygame.SRCALPHA)
+    x = 0
+    for r in rendered:
+        line.blit(r, (x, 0))
+        x += r.get_width()
+    return line
+
+
+def draw_overview(surface, fonts, devices, connected, t0, now, width, height, version, sessions=()):
     surface.fill(BG)
 
     # render first: the layout centres the block from the real text heights
@@ -266,7 +470,13 @@ def draw_overview(surface, fonts, devices, connected, t0, now, width, height, ve
 
     summary_surf = fonts["tiny"].render(summary_text, True, summary_color)
 
-    layout = overview_layout(width, height, clock_surf.get_height(), date_surf.get_height(), summary_surf.get_height())
+    # one more line when Claude Code sessions report in, hidden otherwise
+    parts = agent_summary(sessions)
+    agents_surf = render_agents_line(fonts, parts) if parts else None
+    agents_h = agents_surf.get_height() if agents_surf else 0
+
+    layout = overview_layout(width, height, clock_surf.get_height(), date_surf.get_height(),
+                             summary_surf.get_height(), agents_h=agents_h)
     surface.blit(clock_surf, (width // 2 - clock_surf.get_width() // 2, layout["clock_y"]))
     surface.blit(date_surf, (width // 2 - date_surf.get_width() // 2, layout["date_y"]))
 
@@ -275,10 +485,315 @@ def draw_overview(surface, fonts, devices, connected, t0, now, width, height, ve
     surface.blit(summary_surf, (summary_x, summary_y))
     if connected and total_count:
         draw_pulse_dot(surface, (summary_x - 12, summary_y + summary_surf.get_height() // 2), t0, now)
+    if agents_surf is not None:
+        surface.blit(agents_surf, (width // 2 - agents_surf.get_width() // 2, layout["agents_y"]))
 
     # version in the free bottom-left corner (dots bottom centre, network icon bottom right)
     version_surf = fonts["tiny"].render(version_text(version), True, SUBTEXT)
     surface.blit(version_surf, version_position(height, version_surf.get_height()))
+
+
+def dim_color(color, factor=0.55):
+    return tuple(int(c * factor) for c in color)
+
+
+def draw_agent_icon(surface, icon, center, color, t0, now, size=12):
+    """Built-in state icon, used when no character pack is installed."""
+    cx, cy = center
+    if icon == "pulse":
+        pulse = (math.sin((now - t0) * 2.5) + 1) / 2
+        pulse_color = tuple(int(color[i] * (0.4 + 0.6 * pulse)) for i in range(3))
+        pygame.draw.circle(surface, pulse_color, center, max(4, size // 2))
+        return
+    if icon == "circle":
+        pygame.draw.circle(surface, color, center, size, max(2, size // 6))
+        return
+    if icon == "check":
+        points = [(cx - size * 0.7, cy), (cx - size * 0.2, cy + size * 0.55), (cx + size * 0.75, cy - size * 0.6)]
+        pygame.draw.lines(surface, color, False, points, max(3, size // 4))
+        return
+    # alert, cross and question sit in a ring
+    pygame.draw.circle(surface, color, center, size, max(2, size // 6))
+    stroke = max(2, size // 5)
+    if icon == "alert":
+        pygame.draw.line(surface, color, (cx, cy - size * 0.55), (cx, cy + size * 0.15), stroke)
+        pygame.draw.circle(surface, color, (cx, int(cy + size * 0.5)), max(1, stroke // 2 + 1))
+    elif icon == "cross":
+        d = size * 0.45
+        pygame.draw.line(surface, color, (cx - d, cy - d), (cx + d, cy + d), stroke)
+        pygame.draw.line(surface, color, (cx - d, cy + d), (cx + d, cy - d), stroke)
+    elif icon == "question":
+        rect = pygame.Rect(0, 0, int(size * 0.9), int(size * 0.8))
+        rect.center = (cx, int(cy - size * 0.2))
+        pygame.draw.arc(surface, color, rect, -math.pi / 2, math.pi, stroke)
+        pygame.draw.line(surface, color, (cx, cy + size * 0.2), (cx, cy + size * 0.3), stroke)
+        pygame.draw.circle(surface, color, (cx, int(cy + size * 0.6)), max(1, stroke // 2 + 1))
+
+
+class AgentScene:
+    """What the agents page needs between frames: the pack (or None), the
+    look per project, and the session tracker (new and leaving sessions)."""
+
+    def __init__(self, pack):
+        self.pack = pack
+        self.looks = {}
+        self.tracker = None
+
+    def update(self, sorted_sessions, now):
+        """Called once per new socket line."""
+        self.tracker = charpack.track_sessions(self.tracker, sorted_sessions, now)
+        if self.pack is None:
+            return
+        keys = [charpack.look_key(s.get("project") or "", s.get("device_id") or "") for s in sorted_sessions]
+        # ghosts keep their look while they walk off
+        for ghost in self.tracker["ghosts"].values():
+            g = ghost["session"]
+            keys.append(charpack.look_key(g.get("project") or "", g.get("device_id") or ""))
+        self.looks = charpack.assign_looks(keys, self.looks, self.pack.looks)
+        self.pack.keep_only(self.looks.values())
+
+    def rows(self, sorted_sessions, now):
+        """Sessions to draw: with a pack, ghosts walk off in their old slot;
+        without one a session that left just disappears."""
+        if self.pack is None or self.tracker is None:
+            return list(sorted_sessions)
+        ghosts = {}
+        for sid, ghost in self.tracker["ghosts"].items():
+            if now - ghost["left_at"] < charpack.WALK_OFF_S:
+                ghosts[sid] = ghost
+        return charpack.with_ghosts(sorted_sessions, ghosts)
+
+    def pose(self, session, style, now):
+        """character_pose for a row, from the tracker's local times."""
+        seen = None
+        if self.tracker is not None:
+            seen = self.tracker["seen"].get(session.get("sid"))
+        state_s, new_for_s, leaving_for_s = charpack.pose_times(session, seen, now)
+        return charpack.character_pose(session.get("state"), session.get("quiet") is True, state_s,
+                                       style["dim"], new_for_s, leaving_for_s)
+
+    def look_for(self, session):
+        return self.looks.get(charpack.look_key(session.get("project") or "", session.get("device_id") or ""), 0)
+
+
+def draw_character(surface, scene, session, style, cell, char_scale, emote_scale, emote_pos, now,
+                   clip=None, align_left=False):
+    """The session's character and emote in `cell` (a Rect), centred, or
+    at its left edge with `align_left`. The walk-off is clipped to `clip`
+    (default the cell), so a leaving character never draws over text."""
+    pack = scene.pack
+    pose = scene.pose(session, style, now)
+    now_ms = int(now * 1000)
+    frame = 0 if pose["still"] else charpack.anim_frame(now_ms, charpack.CHAR_FPS, charpack.FRAMES_PER_MOTION)
+    sprite = pack.frame(scene.look_for(session), pose["direction"], pose["motion"], frame, char_scale, pose["dim"])
+    size = sprite.get_width()
+    area = clip if clip is not None else cell
+    x = cell.x if align_left else cell.x + (cell.width - size) // 2
+    x += int(pose["offset"] * area.width)
+    y = cell.y + (cell.height - size) // 2
+    old_clip = surface.get_clip()
+    # the clip is always put back, even if the blit raises
+    try:
+        surface.set_clip(area.clip(old_clip))
+        surface.blit(sprite, (x, y))
+    finally:
+        surface.set_clip(old_clip)
+    if pose["emote"] is not None and emote_scale > 0:
+        bubble = pack.emote(pose["emote"], charpack.emote_frame(pose["emote_for_s"], charpack.CHAR_FPS), emote_scale)
+        if bubble is not None:
+            surface.blit(bubble, emote_pos(x, y, size, bubble.get_width()))
+
+
+def session_style(session):
+    """agent_style for a session; a ghost is grey and says ENDED."""
+    if session.get("ghost"):
+        return agent_style("ended", False, 0)
+    return agent_style(session.get("state"), session.get("quiet") is True, session.get("state_s"))
+
+
+def session_line2(session):
+    """Line 2 for a row or card; a ghost shows only the machine."""
+    if session.get("ghost"):
+        return agent_line2({"label": session.get("label"), "device_id": session.get("device_id")})
+    return agent_line2(session)
+
+
+def agent_colors(style):
+    """Bar, text, secondary text and word colours for one row or card.
+    Needs you is the amber fill with dark text; dimmed rows fade all four."""
+    color = AGENT_COLORS.get(style["color"], SUBTEXT)
+    if style["fill"]:
+        return AMBER_BAR, DARK_TEXT, AMBER_SUBTEXT, DARK_TEXT
+    if style["dim"]:
+        return dim_color(color), dim_color(TEXT), dim_color(SUBTEXT), dim_color(color)
+    return color, TEXT, SUBTEXT, color
+
+
+# border_radius needs pygame 2.0 or later (Raspberry Pi OS ships 2.1).
+def draw_word_badge(surface, font, word, right, center_y):
+    """NEEDS YOU on a row: amber letters on a dark pill, the one inverted
+    element on the page, so it is the first thing seen from across the room.
+    Returns the badge width."""
+    word_surf = font.render(word, True, WARN)
+    pad_x, pad_y = 7, 2
+    badge = pygame.Rect(0, 0, word_surf.get_width() + 2 * pad_x, word_surf.get_height() + 2 * pad_y)
+    badge.midright = (right, center_y)
+    pygame.draw.rect(surface, DARK_TEXT, badge, border_radius=4)
+    surface.blit(word_surf, (badge.x + pad_x, badge.y + pad_y))
+    return badge.width
+
+
+def draw_agent_row(surface, fonts, scene, session, rect, t0, now):
+    """One row: state bar, icon or character, project and time in state,
+    then label, doing and the state word."""
+    x, y, w, h = rect
+    style = session_style(session)
+    bar_color, text_color, sub_color, word_color = agent_colors(style)
+
+    # needs you: the whole row filled amber with dark text
+    if style["fill"]:
+        pygame.draw.rect(surface, WARN, rect)
+    pygame.draw.rect(surface, bar_color, (x, y, AGENT_BAR_W, h))
+
+    # character cell with a pack, else the small built-in icon
+    drawn_character = False
+    if scene.pack is not None:
+        cell = pygame.Rect(x + AGENT_BAR_W + AGENT_CHAR_PAD, y, AGENT_CHAR_CELL - AGENT_CHAR_PAD, h)
+        try:
+            # emote right of the head, its tail tucked into the frame's empty edge
+            draw_character(surface, scene, session, style, cell, charpack.ROW_CHAR_SCALE, charpack.ROW_EMOTE_SCALE,
+                           lambda cx, cy, size, bw: (cx + size - AGENT_EMOTE_TUCK, max(y + 1, cy - 2)), now,
+                           align_left=True)
+            drawn_character = True
+        except Exception as error:
+            # a broken sprite falls back to the icon for this row only
+            print(f"dashboard: character draw failed, icon instead: {error!r}", file=sys.stderr, flush=True)
+    if drawn_character:
+        text_x = x + AGENT_BAR_W + AGENT_CHAR_CELL + AGENT_TEXT_GAP
+    else:
+        icon_color = DARK_TEXT if style["fill"] else bar_color
+        draw_agent_icon(surface, style["icon"], (x + AGENT_BAR_W + AGENT_ICON_CELL // 2 + 4, y + h // 2),
+                        icon_color, t0, now, size=AGENT_ICON_R)
+        text_x = x + AGENT_BAR_W + AGENT_ICON_CELL + AGENT_TEXT_GAP
+
+    # the two lines are centred as one block in the row
+    right = x + w - 12
+    line1_h = fonts["mid"].get_height()
+    line2_h = fonts["small"].get_height()
+    line1_y = y + (h - line1_h - AGENT_LINE_GAP - line2_h) // 2
+    line2_y = line1_y + line1_h + AGENT_LINE_GAP
+
+    # line 1: project and time in state, on the same baseline
+    elapsed_surf = fonts["small"].render(fmt_elapsed(session.get("state_s")), True, sub_color)
+    title_w = right - text_x - elapsed_surf.get_width() - 10
+    title = fit_text(agent_title(session), title_w, lambda t: fonts["mid"].size(t)[0])
+    title_surf = fonts["mid"].render(title, True, text_color)
+    surface.blit(title_surf, (text_x, line1_y))
+    surface.blit(elapsed_surf, (right - elapsed_surf.get_width(), line1_y + line1_h - line2_h - 1))
+
+    # line 2: label and doing, then the state word (a badge for needs you)
+    if style["fill"]:
+        word_w = draw_word_badge(surface, fonts["small"], style["word"], right + 4, line2_y + line2_h // 2)
+    else:
+        word_surf = fonts["small"].render(style["word"], True, word_color)
+        word_w = word_surf.get_width()
+        surface.blit(word_surf, (right - word_w, line2_y))
+    line2_w = right - text_x - word_w - 10
+    line2 = fit_text(session_line2(session), line2_w, lambda t: fonts["small"].size(t)[0])
+    surface.blit(fonts["small"].render(line2, True, sub_color), (text_x, line2_y))
+
+    pygame.draw.line(surface, ROW_LINE, (x, y + h - 1), (x + w, y + h - 1), 1)
+
+
+def card_scales(art):
+    """Character and emote scale for the card: the largest whole-number
+    scale where the character plus its emote above the head fit the art
+    cell, so the bubble gets its own space."""
+    scale = charpack.best_scale(art.width, art.height, charpack.FRAME)
+    while scale > 1:
+        emote = max(1, scale // 2)
+        if (scale + emote) * charpack.FRAME + AGENT_EMOTE_GAP <= art.height:
+            return scale, emote
+        scale -= 1
+    return scale, 0
+
+
+def draw_agent_card(surface, fonts, scene, session, rect, t0, now):
+    """A single session: a big character (or icon) on the left; project,
+    the state word very large, then doing and the times on the right. Both
+    sides are centred as groups, so the card reads as one block."""
+    x, y, w, h = rect
+    style = session_style(session)
+    bar_color, text_color, sub_color, word_color = agent_colors(style)
+    if style["fill"]:
+        pygame.draw.rect(surface, WARN, rect)
+    pygame.draw.rect(surface, bar_color, (x, y, AGENT_BAR_W, h))
+
+    art = pygame.Rect(x + AGENT_BAR_W + AGENT_CARD_PAD, y + AGENT_CARD_PAD, AGENT_ART_W, h - 2 * AGENT_CARD_PAD)
+    drawn_character = False
+    if scene.pack is not None:
+        scale, emote_scale = card_scales(art)
+        if scale > 0:
+            size = scale * charpack.FRAME
+            # room for the bubble only while the pose has one (working never
+            # does), so a character with no emote sits centred
+            has_emote = scene.pose(session, style, now)["emote"] is not None
+            bubble = emote_scale * charpack.FRAME if has_emote else 0
+            group_w = max(size, size * 9 // 16 + bubble)
+            group_h = size + (bubble + AGENT_EMOTE_GAP if bubble else 0)
+            cell = pygame.Rect(art.x + (art.width - group_w) // 2, art.y + (art.height - group_h) // 2 + group_h - size,
+                               size, size)
+            try:
+                # bubble above the head and to its right, never over it
+                draw_character(surface, scene, session, style, cell, scale, emote_scale,
+                               lambda cx, cy, sz, bw: (cx + sz * 9 // 16, cy - bw - AGENT_EMOTE_GAP + scale), now,
+                               clip=art)
+                drawn_character = True
+            except Exception as error:
+                print(f"dashboard: character draw failed, icon instead: {error!r}", file=sys.stderr, flush=True)
+    if not drawn_character:
+        icon_color = DARK_TEXT if style["fill"] else bar_color
+        draw_agent_icon(surface, style["icon"], art.center, icon_color, t0, now, size=44)
+
+    text_x = art.right + 16
+    text_w = x + w - 14 - text_x
+    title = fit_text(agent_title(session), text_w, lambda t: fonts["big"].size(t)[0])
+    title_surf = fonts["big"].render(title, True, text_color)
+    # the state word is the largest thing on the card; a long word steps down
+    word_font = fonts["huge"] if fonts["huge"].size(style["word"])[0] <= text_w else fonts["big"]
+    word_surf = word_font.render(style["word"], True, word_color)
+    doing = fit_text(session_line2(session), text_w, lambda t: fonts["small"].size(t)[0])
+    doing_surf = fonts["small"].render(doing, True, sub_color)
+    times = "for %s  \u00b7  running %s" % (fmt_elapsed(session.get("state_s")), fmt_elapsed(session.get("running_s")))
+    times_surf = fonts["small"].render(fit_text(times, text_w, lambda t: fonts["small"].size(t)[0]), True, sub_color)
+
+    lines = [(title_surf, 0), (word_surf, 2), (doing_surf, 12), (times_surf, 4)]
+    block_h = sum(surf.get_height() + gap for surf, gap in lines)
+    line_y = y + (h - block_h) // 2
+    for surf, gap in lines:
+        line_y += gap
+        surface.blit(surf, (text_x, line_y))
+        line_y += surf.get_height()
+
+
+def draw_agents(surface, fonts, scene, rows, page_number, page_count, t0, now, width, height):
+    """One agents page: header, then one card or up to 5 rows."""
+    surface.fill(BG)
+    title_surf = fonts["mid"].render("Agents", True, TEXT)
+    surface.blit(title_surf, (14, (AGENT_HEADER_H - title_surf.get_height()) // 2))
+    if page_count > 1:
+        page_surf = fonts["small"].render(f"{page_number + 1}/{page_count}", True, SUBTEXT)
+        surface.blit(page_surf, (14 + title_surf.get_width() + 10, (AGENT_HEADER_H - page_surf.get_height()) // 2 + 1))
+    clock_surf = fonts["small"].render(time.strftime("%H:%M"), True, SUBTEXT)
+    surface.blit(clock_surf, (width - clock_surf.get_width() - 14, (AGENT_HEADER_H - clock_surf.get_height()) // 2))
+    pygame.draw.line(surface, ROW_LINE, (0, AGENT_HEADER_H - 1), (width, AGENT_HEADER_H - 1), 1)
+
+    rects = agent_rows_layout(width, height, len(rows), AGENT_HEADER_H, AGENT_FOOTER_H)
+    if len(rows) == 1:
+        draw_agent_card(surface, fonts, scene, rows[0], rects[0], t0, now)
+        return
+    for session, rect in zip(rows, rects):
+        draw_agent_row(surface, fonts, scene, session, rect, t0, now)
 
 
 class DeviceView:
@@ -351,18 +866,21 @@ class DeviceView:
         surface.blit(ml_surf, (280 - ml_surf.get_width() // 2, 228))
 
 
+def load_pack():
+    """The installed character pack, or None. Never fatal."""
+    try:
+        return sprites.CharacterPack.load(CHARACTERS_DIR)
+    except Exception as error:
+        print(f"dashboard: character pack not loaded, built-in icons: {error!r}", file=sys.stderr, flush=True)
+        return None
+
+
 def main():
     fb = FrameBuffer(path=FB_PATH)
     surface = fb.surface_for_drawing()
     width, height = surface.get_size()
 
-    fonts = {
-        "clock": pygame.font.Font(None, 120),
-        "big": pygame.font.Font(None, 40),
-        "mid": pygame.font.Font(None, 26),
-        "small": pygame.font.Font(None, 20),
-        "tiny": pygame.font.Font(None, 16),
-    }
+    fonts = load_fonts()
 
     # read once: the VERSION file sits one folder above this dashboard folder
     version = read_version(os.path.dirname(os.path.abspath(__file__)))
@@ -374,6 +892,15 @@ def main():
     views = {}  # device_id -> DeviceView, built lazily on first sight
     page = 0
     last_taps = 0
+    last_tap_at = None
+
+    # agents: pack, looks and tracker; states of the last line for the focus jump
+    scene = AgentScene(load_pack())
+    sorted_sessions = []
+    last_line_no = 0
+    prev_states = None
+    # current page key and the focus jump (layout.step_focus decides)
+    focus = focus_state(("overview", None))
     transition_until = 0.0
     prev_frame = None
     frame_b = pygame.Surface((width, height), depth=16, masks=surface.get_masks())
@@ -401,19 +928,45 @@ def main():
                     return
 
             devices = sorted(reader.devices, key=lambda d: d.get("device_id", ""))
-            total_pages = 1 + len(devices)  # page 0 is always the overview
+
+            # a new socket line: re-sort sessions, track new and leaving ones,
+            # and jump to the agents page when one newly needs you
+            line_no = reader.line_no
+            if line_no != last_line_no:
+                last_line_no = line_no
+                sorted_sessions = sort_agents(reader.sessions)
+                scene.update(sorted_sessions, now)
+                new_states = {s.get("sid"): s.get("state") for s in sorted_sessions}
+                focus = step_focus(focus, {"kind": "line", "prev_states": prev_states, "new_states": new_states,
+                                           "last_tap": last_tap_at, "blocked": showing_problem}, now)
+                prev_states = new_states
+
+            # the page ring: overview, agents pages, devices
+            agent_rows_all = scene.rows(sorted_sessions, now)
+            ring = page_ring(len(devices), len(agent_rows_all))
+            keys = page_keys(ring, devices)
+            # an expired focus returns; a page that has gone falls back
+            focus = step_focus(focus, {"kind": "tick", "keys": keys}, now)
 
             if touch.taps != last_taps:
+                last_tap_at = now
                 if showing_problem:
                     return  # any tap here exits the loop, back to the terminal
-                elif not net_monitor.ok and point_in_circle(touch.last_pos, net_icon_center, net_icon_tap_radius):
-                    showing_problem = True
-                else:
+                # a tap on the network icon opens the problem screen, any other tap turns the page
+                advance = net_monitor.ok or not point_in_circle(touch.last_pos, net_icon_center, net_icon_tap_radius)
+                if advance:
                     prev_frame = pygame.Surface((width, height), depth=16, masks=surface.get_masks())
                     prev_frame.blit(surface, (0, 0))
-                    page = (page + 1) % total_pages
                     transition_until = now + TRANSITION_SECS
+                else:
+                    showing_problem = True
+                # any tap ends the focus jump
+                focus = step_focus(focus, {"kind": "tap", "keys": keys, "advance": advance}, now)
             last_taps = touch.taps
+            page_key = focus["page_key"]
+            page = keys.index(page_key)
+            total_pages = len(ring)
+            kind, value = ring[page]
 
             # Draw this frame. One bad device (odd text, huge numbers) must not
             # kill the display loop, so any drawing error is caught, logged
@@ -422,11 +975,16 @@ def main():
                 if showing_problem:
                     draw_network_problem(surface, fonts, net_monitor.reason, width, height)
                 else:
-                    page %= total_pages
-                    if page == 0:
-                        draw_overview(surface, fonts, devices, reader.connected, t0, now, width, height, version)
+                    if kind == "overview":
+                        draw_overview(surface, fonts, devices, reader.connected, t0, now, width, height, version,
+                                      sessions=sorted_sessions)
+                    elif kind == "agents":
+                        start, end = value
+                        agent_page_count = len([key for key in keys if key[0] == "agents"])
+                        draw_agents(surface, fonts, scene, agent_rows_all[start:end], page_key[1],
+                                    agent_page_count, t0, now, width, height)
                     else:
-                        device = devices[page - 1]
+                        device = devices[value]
                         view = views.setdefault(device["device_id"], DeviceView())
                         view.ease(device)
                         view.render(surface, device, fonts, t0, now, width, height)
@@ -470,7 +1028,11 @@ def main():
                 surface.blit(msg, (width // 2 - msg.get_width() // 2, height // 2 - 10))
 
             fb.flip()
-            clock.tick(FPS)
+            # 5 fps only while characters animate on the agents page
+            if kind == "agents" and scene.pack is not None and not showing_problem:
+                clock.tick(AGENTS_FPS)
+            else:
+                clock.tick(FPS)
     except KeyboardInterrupt:
         pass
     finally:

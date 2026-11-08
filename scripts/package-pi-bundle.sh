@@ -20,6 +20,21 @@ die() {
   exit 1
 }
 
+# licence guard (T-053): character packs are licensed to their owner and must
+# never be redistributed, so no pack-shaped file may sit in a folder the
+# bundle is built from, and the finished bundle may hold no image or zip
+# (no `find | head` here: under pipefail a closed pipe would end the
+# script silently, before the message)
+refuse_pack_files() {
+  local found
+  found="$(find "$@" \( -iname 'NPC_*.png' -o -iname '*_emote_16x16.png' -o -iname '*.zip' \
+    -o \( -type d \( -name characters -o -name Emotes \) \) \) -print 2>/dev/null || true)"
+  if [[ -n "$found" ]]; then
+    sed -n '1,5p' <<<"$found" >&2
+    die "character pack files found where the bundle is built from; a pack must never enter a bundle (see above)"
+  fi
+}
+
 # parse flags
 VERSION=""
 BIN_DIR="$REPO/target/aarch64-unknown-linux-musl/release"
@@ -58,6 +73,8 @@ for bin in deskpane-daemon deskpane; do
   fi
 done
 
+refuse_pack_files "$REPO/pi" "$REPO/deploy"
+
 # lay the bundle out in a temp directory
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
@@ -69,9 +86,17 @@ echo "$VERSION" >"$DIR/VERSION"
 install -m 0644 "$REPO/LICENSE" "$REPO/deploy/README.txt" "$REPO/deploy/overlay.env" "$DIR/"
 install -m 0755 "$REPO/deploy/install.sh" "$REPO/deploy/uninstall.sh" "$DIR/"
 install -m 0755 "$BIN_DIR/deskpane-daemon" "$BIN_DIR/deskpane" "$DIR/bin/"
-install -m 0644 "$REPO/pi/dashboard.py" "$REPO/pi/fb_display.py" "$REPO/pi/touch.py" "$REPO/pi/layout.py" "$DIR/dashboard/"
+install -m 0644 "$REPO/pi/dashboard.py" "$REPO/pi/fb_display.py" "$REPO/pi/touch.py" "$REPO/pi/layout.py" \
+  "$REPO/pi/charpack.py" "$REPO/pi/charpack_install.py" "$REPO/pi/sprites.py" "$DIR/dashboard/"
 install -m 0644 "$REPO"/deploy/systemd/*.service "$DIR/systemd/"
 install -m 0644 "$REPO/deploy/env.example" "$DIR/config/"
+
+# the staged bundle itself: no images or zips at all, whatever their name
+STAGED_MEDIA="$(find "$DIR" \( -iname '*.png' -o -iname '*.zip' \) -print || true)"
+if [[ -n "$STAGED_MEDIA" ]]; then
+  sed -n '1,5p' <<<"$STAGED_MEDIA" >&2
+  die "the bundle would contain image or zip files (character pack?); refusing to build"
+fi
 
 # same bytes for the same inputs: sorted names, root owner, commit time as mtime
 MTIME="$(git -C "$REPO" log -1 --format=%ct 2>/dev/null || date +%s)"

@@ -11,6 +11,8 @@
 #
 # Usage: scripts/provision-pi.sh [ssh-host] [install.sh options...]
 #   e.g. scripts/provision-pi.sh pi-zero --label "Pi Zero"
+#   --characters ZIP is read here: the local zip is copied into the Pi's temp
+#   folder with the bundle, passed to install.sh, and removed with the folder.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,6 +29,22 @@ die() {
 
 # an ssh host starting with "-" would be read as an ssh option
 [[ "$HOST" != -* ]] || die "ssh host must not start with '-': $HOST"
+
+# install.sh options, except --characters, whose zip is local to this machine
+INSTALL_OPTS=()
+CHARACTERS_ZIP=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == --characters ]]; then
+    [[ $# -ge 2 ]] || die "--characters needs a value: the path of the pack zip"
+    [[ -f "$2" && ! -L "$2" ]] || die "--characters: $2 is not a regular file"
+    # one absolute path, fixed now, for the scp below
+    CHARACTERS_ZIP="$(realpath -- "$2")"
+    shift 2
+    continue
+  fi
+  INSTALL_OPTS+=("$1")
+  shift
+done
 
 # local work directory, removed on exit
 WORK_DIR="$(mktemp -d)"
@@ -53,12 +71,18 @@ TOP="deskpane-$VERSION-pi-aarch64"
 echo "==> copying to $HOST"
 REMOTE_DIR="$(ssh -o ConnectTimeout=5 "$HOST" 'mktemp -d')"
 [[ "$REMOTE_DIR" =~ ^/tmp/tmp\.[A-Za-z0-9]+$ ]] || die "unexpected remote temp dir: $REMOTE_DIR"
-scp -q "$WORK_DIR/deskpane-pi-aarch64.tar.gz" "$WORK_DIR/tft35a.dtbo" "$HOST:$REMOTE_DIR/"
+scp -q -- "$WORK_DIR/deskpane-pi-aarch64.tar.gz" "$WORK_DIR/tft35a.dtbo" "$HOST:$REMOTE_DIR/"
+# the pack goes into the same temp folder under a fixed name, removed with it
+if [[ -n "$CHARACTERS_ZIP" ]]; then
+  echo "==> copying the character pack to $HOST"
+  scp -q -- "$CHARACTERS_ZIP" "$HOST:$REMOTE_DIR/characters.zip"
+  INSTALL_OPTS+=(--characters "$REMOTE_DIR/characters.zip")
+fi
 
 # extract and install; -t so sudo can ask for the password
 INSTALL_ARGS=""
-if [[ $# -gt 0 ]]; then
-  INSTALL_ARGS="$(printf ' %q' "$@")"
+if [[ ${#INSTALL_OPTS[@]} -gt 0 ]]; then
+  INSTALL_ARGS="$(printf ' %q' "${INSTALL_OPTS[@]}")"
 fi
 echo "==> running install.sh on $HOST"
 ssh -t "$HOST" "cd $REMOTE_DIR && tar xzf deskpane-pi-aarch64.tar.gz && sudo ./$TOP/install.sh --overlay-file $REMOTE_DIR/tft35a.dtbo$INSTALL_ARGS; status=\$?; rm -rf $REMOTE_DIR; exit \$status"

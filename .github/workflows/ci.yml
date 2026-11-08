@@ -81,8 +81,11 @@ jobs:
         with:
           persist-credentials: false
       - run: shellcheck get.sh deploy/install.sh deploy/uninstall.sh scripts/*.sh
+      # licence guard (T-053): no character pack file may ever be tracked
+      - run: scripts/check-no-pack-files.sh
       - run: python3 -m py_compile pi/*.py pi/tests/*.py
-      # pure dashboard helpers (pi/layout.py); stdlib unittest, no pygame needed
+      # pure dashboard helpers (layout, charpack), the pack installer and the
+      # fake-root shell tests; stdlib unittest, no pygame needed
       - run: python3 -m unittest discover -s pi/tests -v
 
   # trial Pi bundle build, so packaging breaks on the PR and not on release day
@@ -100,3 +103,9 @@ jobs:
       - run: cargo build --release --locked --target aarch64-unknown-linux-musl -p daemon -p reporter
       - run: scripts/package-pi-bundle.sh
       - run: tar tzvf dist/deskpane-pi-aarch64.tar.gz
+      # licence guard (T-053): the bundle never carries images or zips
+      - run: |
+          if tar tzf dist/deskpane-pi-aarch64.tar.gz | grep -Ei '\.(png|zip)$'; then
+            echo "error: the Pi bundle contains image or zip files (character pack?)" >&2
+            exit 1
+          fi

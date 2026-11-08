@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Removes deskpane from this Pi. By default it keeps the settings in
 # /etc/deskpane, the deskpane user, the display overlay and the
-# boot config lines, so a later install.sh picks up where it left off.
+# boot config lines and the character pack in /var/lib/deskpane, so a later
+# install.sh picks up where it left off.
 #
 # Usage: sudo ./uninstall.sh [--purge]
-#   --purge  also remove the settings, the user, the overlay and our boot config lines
+#   --purge  also remove the settings, the user, the overlay, our boot config
+#            lines and /var/lib/deskpane (the character pack)
 #
 # DESKPANE_DESTDIR (empty by default) prefixes every file path, for testing in a
 # fake root. A plain DESTDIR from the caller's environment is ignored on purpose.
@@ -15,6 +17,7 @@ CONFIG_DIR=/etc/deskpane
 UNIT_DIR=/etc/systemd/system
 BOOT_DIR=/boot/firmware
 SERVICE_USER=deskpane
+STATE_DIR=/var/lib/deskpane
 DESTDIR="${DESKPANE_DESTDIR:-}"
 UNITS=(deskpane-reporter.service deskpane-dashboard.service deskpane-unbind-fbcon.service deskpane-daemon.service)
 
@@ -31,7 +34,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --purge) PURGE=1 ;;
     -h | --help)
-      sed -n '2,8p' "$0"
+      sed -n '2,10p' "$0"
       exit 0
       ;;
     *) die "unknown option: $1 (see --help)" ;;
@@ -54,13 +57,13 @@ say "removing $PREFIX"
 rm -rf "$DESTDIR$PREFIX"
 
 if [[ "$PURGE" -eq 0 ]]; then
-  say "done. Kept $CONFIG_DIR, the $SERVICE_USER user and the display setup (use --purge to remove them)"
+  say "done. Kept $CONFIG_DIR, $STATE_DIR, the $SERVICE_USER user and the display setup (use --purge to remove them)"
   exit 0
 fi
 
-# settings and user
-say "removing $CONFIG_DIR and the $SERVICE_USER user"
-rm -rf "$DESTDIR$CONFIG_DIR"
+# settings, state (the character pack) and user
+say "removing $CONFIG_DIR, $STATE_DIR and the $SERVICE_USER user"
+rm -rf "$DESTDIR$CONFIG_DIR" "$DESTDIR$STATE_DIR"
 if getent passwd "$SERVICE_USER" >/dev/null; then
   userdel "$SERVICE_USER"
 fi

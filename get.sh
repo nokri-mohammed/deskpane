@@ -16,6 +16,8 @@
 #   --no-reporter        do not report the Pi's own stats (passed to install.sh)
 #   --device-id ID       device id for this machine's reporter (default: automatic, from the machine id)
 #   --label TEXT         name shown on the dashboard for this machine (default: the hostname)
+#   --characters ZIP     Pi only: install a character pack zip for the agents page; copy
+#                        the zip onto the Pi first (e.g. with scp), it is never downloaded
 #   --reporter-only      install only the `deskpane` client to /usr/local/bin (any Linux)
 #   --daemon HOST:PORT   with --reporter-only: report to this Pi at boot (systemd unit)
 #
@@ -44,7 +46,7 @@ main() {
   fi
 
   # parse flags
-  local version="" reboot=1 reporter_only=0 daemon_addr="" device_id="" label=""
+  local version="" reboot=1 reporter_only=0 daemon_addr="" device_id="" label="" characters=""
   local install_args=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -65,6 +67,11 @@ main() {
         label="$2"
         shift
         ;;
+      --characters)
+        [[ $# -ge 2 ]] || die "--characters needs a value: the path of the pack zip on this Pi"
+        characters="$2"
+        shift
+        ;;
       --reporter-only) reporter_only=1 ;;
       --daemon)
         [[ $# -ge 2 ]] || die "--daemon needs a value, e.g. --daemon 192.168.1.50:8765"
@@ -74,7 +81,7 @@ main() {
       -h | --help)
         # piped, there is no file to print from, so point at the source
         if [[ -f "${BASH_SOURCE[0]:-}" ]]; then
-          sed -n '2,26p' "${BASH_SOURCE[0]}"
+          sed -n '2,28p' "${BASH_SOURCE[0]}"
         else
           echo "Options and usage: https://github.com/$repo/blob/main/get.sh"
         fi
@@ -86,6 +93,15 @@ main() {
   done
   if [[ -n "$daemon_addr" && "$reporter_only" -eq 0 ]]; then
     die "--daemon only goes with --reporter-only"
+  fi
+  # the pack is for the Pi's screen; it is checked once the bundle is here
+  if [[ -n "$characters" ]]; then
+    [[ "$reporter_only" -eq 0 ]] || die "--characters is for the Pi install; it cannot be used with --reporter-only"
+    [[ -f "$characters" ]] || die "--characters: $characters not found (copy the zip onto this Pi first)"
+    # absolute, because install.sh runs from the download folder; CDPATH
+    # cleared so cd cannot jump elsewhere, -- so a leading dash is no option
+    characters="$(CDPATH='' cd -- "$(dirname -- "$characters")" && pwd -P)/$(basename -- "$characters")"
+    install_args+=(--characters "$characters")
   fi
 
   # common checks: root, Linux, 64-bit
@@ -258,6 +274,29 @@ install_pi() {
   bundle="$(find "$WORK_DIR" -maxdepth 1 -type d -name 'deskpane-*-pi-aarch64' | head -n 1)"
   [[ -n "$bundle" && -x "$bundle/install.sh" ]] || die "the bundle has no install.sh"
 
+  # character pack: the bundle must support it and the zip must pass the
+  # bundle's own validator, before remove_old_install or anything else
+  # changes the system (--check writes nothing)
+  local arg characters="" take_next=0
+  for arg in "${install_args[@]}"; do
+    if [[ "$take_next" -eq 1 ]]; then
+      characters="$arg"
+      take_next=0
+    elif [[ "$arg" == --characters ]]; then
+      take_next=1
+    fi
+  done
+  if [[ -n "$characters" ]]; then
+    # bundles older than 0.2.0-beta.1 have no character packs
+    if ! grep -q -- '--characters' "$bundle/install.sh" || [[ ! -f "$bundle/dashboard/charpack_install.py" ]]; then
+      die "deskpane $version does not support --characters (character packs start with 0.2.0-beta.1)"
+    fi
+    command -v python3 >/dev/null || die "--characters needs python3 (sudo apt-get install python3)"
+    say "checking the character pack $characters"
+    python3 -I "$bundle/dashboard/charpack_install.py" --check "$characters" "$DESTDIR/var/lib/deskpane/characters" ||
+      die "the character pack was refused; nothing was changed"
+  fi
+
   # pass identity flags through; install.sh validates them
   if [[ -n "$device_id" ]]; then
     install_args+=(--device-id "$device_id")
@@ -303,7 +342,7 @@ install_pi() {
   echo "Or run the client by hand (id and label are automatic, or pass --device-id and --label):"
   echo "  deskpane report --daemon ${ip:-<pi-ip>}:8765"
 
-  local with_display=1 arg
+  local with_display=1
   for arg in "${install_args[@]}"; do
     if [[ "$arg" == --no-display ]]; then
       with_display=0

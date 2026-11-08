@@ -14,6 +14,11 @@ CONFIG_DIR=/etc/deskpane
 UNIT_DIR=/etc/systemd/system
 BOOT_DIR=/boot/firmware
 SERVICE_USER=deskpane
+# optional character pack: state that outlives upgrades, never in a release
+STATE_DIR=/var/lib/deskpane
+CHARACTERS_DIR=$STATE_DIR/characters
+# the real pack is about 100 KB; charpack.py has the same cap
+MAX_CHARACTERS_ZIP_BYTES=$((4 * 1024 * 1024))
 DESTDIR="${DESKPANE_DESTDIR:-}"
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -41,6 +46,9 @@ Usage: sudo ./install.sh [options]
   --label TEXT         label shown on the dashboard (first install only), up to 64
                        (default: the hostname)
   --overlay-file FILE  use an already downloaded display overlay (hash still checked)
+  --characters ZIP     install a character pack zip for the agents page into
+                       /var/lib/deskpane/characters (checked first, never unzipped)
+  --remove-characters  remove the installed character pack (built-in icons again)
   --no-summary         skip the closing summary (get.sh prints its own)
   -h, --help           show this help
 EOF
@@ -133,6 +141,8 @@ WITH_REPORTER=1
 DEVICE_ID=""
 LABEL=""
 OVERLAY_FILE=""
+CHARACTERS_ZIP=""
+REMOVE_CHARACTERS=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-display) WITH_DISPLAY=0 ;;
@@ -152,6 +162,12 @@ while [[ $# -gt 0 ]]; do
       OVERLAY_FILE="$2"
       shift
       ;;
+    --characters)
+      [[ $# -ge 2 ]] || die "--characters needs a value: the path of the pack zip"
+      CHARACTERS_ZIP="$2"
+      shift
+      ;;
+    --remove-characters) REMOVE_CHARACTERS=1 ;;
     --no-summary) SUMMARY=0 ;;
     -h | --help)
       usage
@@ -173,6 +189,7 @@ if [[ "$WITH_DISPLAY" -eq 1 && ! -f "$DESTDIR$BOOT_DIR/config.txt" ]]; then
 fi
 for f in VERSION LICENSE overlay.env config/env.example bin/deskpane-daemon bin/deskpane \
   dashboard/dashboard.py dashboard/fb_display.py dashboard/touch.py dashboard/layout.py \
+  dashboard/charpack.py dashboard/charpack_install.py dashboard/sprites.py \
   systemd/deskpane-daemon.service systemd/deskpane-dashboard.service \
   systemd/deskpane-reporter.service systemd/deskpane-unbind-fbcon.service; do
   [[ -f "$BUNDLE_DIR/$f" ]] || die "bundle is incomplete: $f is missing"
@@ -190,9 +207,31 @@ if [[ -n "$LABEL" && ! "$LABEL" =~ $LABEL_PATTERN ]]; then
   die "--label: up to 64 letters, digits, spaces and . _ ( ) -, starting with a letter or digit"
 fi
 
-# work directory for downloads, removed on exit
+# work directory for downloads, removed on exit (root only, from mktemp)
 WORK_DIR="$(mktemp -d /tmp/deskpane.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
+
+# character pack: check the whole zip now, before anything on the system
+# changes. The zip is copied once, at most 4 MiB plus one byte, into the
+# root-only work folder; that private copy is what gets checked and later
+# installed, so the user's file can change under us without effect. The
+# validator is stdlib Python, run isolated (-I); it never calls unzip and
+# writes nothing in --check mode.
+PACK_COPY=""
+if [[ -n "$CHARACTERS_ZIP" ]]; then
+  [[ "$REMOVE_CHARACTERS" -eq 0 ]] || die "--characters and --remove-characters cannot be used together"
+  [[ "$WITH_DISPLAY" -eq 1 ]] || die "--characters needs the dashboard; it cannot be used with --no-display"
+  [[ -f "$CHARACTERS_ZIP" && ! -L "$CHARACTERS_ZIP" ]] || die "--characters: $CHARACTERS_ZIP is not a regular file (no symlinks or devices)"
+  command -v python3 >/dev/null || die "--characters needs python3 (sudo apt-get install python3)"
+  PACK_COPY="$WORK_DIR/characters.zip"
+  head -c "$((MAX_CHARACTERS_ZIP_BYTES + 1))" -- "$CHARACTERS_ZIP" >"$PACK_COPY" ||
+    die "--characters: cannot read $CHARACTERS_ZIP"
+  ZIP_BYTES="$(wc -c <"$PACK_COPY")"
+  [[ "$ZIP_BYTES" -le "$MAX_CHARACTERS_ZIP_BYTES" ]] || die "--characters: the zip is bigger than 4 MiB"
+  say "checking the character pack (copied to $PACK_COPY)"
+  python3 -I "$BUNDLE_DIR/dashboard/charpack_install.py" --check "$PACK_COPY" "$DESTDIR$CHARACTERS_DIR" ||
+    die "the character pack was refused; nothing was changed"
+fi
 
 # display overlay: get it and check its hash before changing anything on the system
 OVERLAY_TMP="$WORK_DIR/tft35a.dtbo"
@@ -275,6 +314,25 @@ if [[ -z "$PREVIOUS" || "$PREVIOUS" == "$VERSION" ]]; then
 fi
 ln -sfn "releases/$VERSION" "$DESTDIR$PREFIX/current.new"
 mv -Tf "$DESTDIR$PREFIX/current.new" "$DESTDIR$PREFIX/current"
+
+# character pack: written only with --characters, removed only with
+# --remove-characters; otherwise the folder is left exactly as it is.
+# Root owns it; the dashboard only reads it (ProtectSystem=strict keeps
+# /var/lib readable). Fixed file names only, swapped in as a whole. The pack
+# is optional, so a failure here warns and the install carries on; the
+# previous pack (if any) stays as it was.
+if [[ -n "$PACK_COPY" ]]; then
+  say "installing the character pack into $CHARACTERS_DIR"
+  if install -d -m 0755 -o root -g root "$DESTDIR$STATE_DIR" &&
+    python3 -I "$RELEASE_DIR/dashboard/charpack_install.py" "$PACK_COPY" "$DESTDIR$CHARACTERS_DIR"; then
+    chown -R root:root "$DESTDIR$CHARACTERS_DIR"
+  else
+    warn "the character pack could not be installed; continuing with the built-in icons"
+  fi
+elif [[ "$REMOVE_CHARACTERS" -eq 1 ]]; then
+  say "removing the character pack from $CHARACTERS_DIR"
+  rm -rf "$DESTDIR$CHARACTERS_DIR" "$DESTDIR$CHARACTERS_DIR.new" "$DESTDIR$CHARACTERS_DIR.old"
+fi
 
 # settings: written on the first install only, never overwritten; root-only
 # (systemd reads EnvironmentFile as root before it drops to the service user)
