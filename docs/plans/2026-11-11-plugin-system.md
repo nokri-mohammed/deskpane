@@ -791,7 +791,7 @@ plugins.
 4. **Bundle every merged plugin, or a curated default set?** *Recommend:* a small curated default
    set ships in the release; everything else is opt-in by install, so the default image stays
    lean on the Pi Zero 2 W.
-5. **Custom-metric packet kind now or later?** *Recommend later:* extend the existing kinds first,
+5. **Custom-metric packet kind now or later?** *Decided 2026-11-11: now* (Phase 2 plan D1). Original recommendation, later: extend the existing kinds first,
    add a generic custom-metric kind only when a real plugin needs a field no existing one carries.
 6. **Keep in-process Python core panels, or make even core panels declarative?** *Recommend a
    sunset, not an open door* (security-specialist agreed): keep the existing three pages as Python
