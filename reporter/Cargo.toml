@@ -19,5 +19,5 @@ sysinfo = "0.32"
 serde = { version = "1", features = ["derive"] }
 # preserve_order keeps the keys of ~/.claude/settings.json in their order (install-hooks)
 serde_json = { version = "1", features = ["preserve_order"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 sha2 = "0.10"
