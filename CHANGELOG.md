@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.0-beta.7](https://github.com/nokri-mohammed/deskpane/compare/v0.1.0-beta.6...v0.1.0-beta.7) (2026-11-11)
+
+
+### Bug Fixes
+
+* **dashboard:** return to the overview when the device on screen goes offline ([#9](https://github.com/nokri-mohammed/deskpane/issues/9)) ([0dd6485](https://github.com/nokri-mohammed/deskpane/commit/0dd64853dc271dc1e5ab1a159b8a9f91f488a7ab))
+
 ## [0.1.0-beta.6](https://github.com/nokri-mohammed/deskpane/compare/v0.1.0-beta.5...v0.1.0-beta.6) (2026-11-11)
 
 
