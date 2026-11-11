@@ -14,6 +14,8 @@ CONFIG_DIR=/etc/deskpane
 UNIT_DIR=/etc/systemd/system
 BOOT_DIR=/boot/firmware
 SERVICE_USER=deskpane
+# the reporter unit's SupplementaryGroups: may read pisugar-server's socket (T-064)
+PISUGAR_GROUP=pisugar
 # optional character pack: state that outlives upgrades, never in a release
 STATE_DIR=/var/lib/deskpane
 CHARACTERS_DIR=$STATE_DIR/characters
@@ -189,7 +191,8 @@ if [[ "$WITH_DISPLAY" -eq 1 && ! -f "$DESTDIR$BOOT_DIR/config.txt" ]]; then
 fi
 for f in VERSION LICENSE overlay.env config/env.example bin/deskpane-daemon bin/deskpane \
   dashboard/dashboard.py dashboard/fb_display.py dashboard/touch.py dashboard/layout.py \
-  dashboard/charpack.py dashboard/charpack_install.py dashboard/sprites.py \
+  dashboard/deskpane_contract.py \
+  dashboard/charpack.py dashboard/charpack_install.py dashboard/sprites.py dashboard/display.py \
   systemd/deskpane-daemon.service systemd/deskpane-dashboard.service \
   systemd/deskpane-reporter.service systemd/deskpane-unbind-fbcon.service; do
   [[ -f "$BUNDLE_DIR/$f" ]] || die "bundle is incomplete: $f is missing"
@@ -283,6 +286,19 @@ else
   say "creating system user $SERVICE_USER"
   useradd --system --user-group --no-create-home --home-dir /nonexistent \
     --shell /usr/sbin/nologin "$SERVICE_USER"
+fi
+
+# group pisugar for the reporter unit (SupplementaryGroups=pisugar, T-064).
+# systemd refuses to start a unit whose group does not exist, so it is made
+# here when missing. It grants nothing until pisugar-server is set up with
+# its socket in group pisugar (docs/INSTALL.md, "PiSugar battery").
+if [[ "$WITH_REPORTER" -eq 1 ]]; then
+  if getent group "$PISUGAR_GROUP" >/dev/null; then
+    say "group $PISUGAR_GROUP already exists"
+  else
+    say "creating system group $PISUGAR_GROUP (battery reading, optional)"
+    groupadd --system "$PISUGAR_GROUP"
+  fi
 fi
 
 # copy this release to /opt, owned by root so the service user cannot change it

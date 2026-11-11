@@ -87,7 +87,9 @@ install -m 0644 "$REPO/LICENSE" "$REPO/deploy/README.txt" "$REPO/deploy/overlay.
 install -m 0755 "$REPO/deploy/install.sh" "$REPO/deploy/uninstall.sh" "$DIR/"
 install -m 0755 "$BIN_DIR/deskpane-daemon" "$BIN_DIR/deskpane" "$DIR/bin/"
 install -m 0644 "$REPO/pi/dashboard.py" "$REPO/pi/fb_display.py" "$REPO/pi/touch.py" "$REPO/pi/layout.py" \
-  "$REPO/pi/charpack.py" "$REPO/pi/charpack_install.py" "$REPO/pi/sprites.py" "$DIR/dashboard/"
+  "$REPO/pi/deskpane_contract.py" \
+  "$REPO/pi/charpack.py" "$REPO/pi/charpack_install.py" "$REPO/pi/sprites.py" "$REPO/pi/display.py" \
+  "$DIR/dashboard/"
 install -m 0644 "$REPO"/deploy/systemd/*.service "$DIR/systemd/"
 install -m 0644 "$REPO/deploy/env.example" "$DIR/config/"
 

@@ -287,9 +287,9 @@ install_pi() {
     fi
   done
   if [[ -n "$characters" ]]; then
-    # bundles older than 0.2.0-beta.1 have no character packs
+    # bundles older than 0.1.0-beta.4 have no character packs
     if ! grep -q -- '--characters' "$bundle/install.sh" || [[ ! -f "$bundle/dashboard/charpack_install.py" ]]; then
-      die "deskpane $version does not support --characters (character packs start with 0.2.0-beta.1)"
+      die "deskpane $version does not support --characters (character packs start with 0.1.0-beta.4)"
     fi
     command -v python3 >/dev/null || die "--characters needs python3 (sudo apt-get install python3)"
     say "checking the character pack $characters"
