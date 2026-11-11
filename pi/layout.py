@@ -322,26 +322,29 @@ def agent_pages(count, per_page=AGENTS_PER_PAGE):
 
 
 # The page providers, in ring order. Each is (kind, enumerate) where enumerate
-# (device_count, session_count) returns that panel's page values: the overview
-# is always one page (value None); the agents panel is one page per slice of
-# sessions (none without sessions); the device panel is one page per device.
+# (device_count, session_count, panel_count) returns that panel's page values:
+# the overview is always one page (value None); the agents panel is one page
+# per slice of sessions (none without sessions); the device panel is one page
+# per device; the plugin panel is one page per loaded plugin panel (its index
+# in the dashboard's loaded panel list, none unless PANELS turns one on).
 # This is the pure half of the panel registry: the ring "comes from" this list,
 # and dashboard.py registers a draw function per kind in the same order. Adding
 # a panel kind later is one entry here plus its draw, not an edit to page_ring.
 PAGE_PROVIDERS = (
-    ("overview", lambda device_count, session_count: [None]),
-    ("agents", lambda device_count, session_count: agent_pages(session_count)),
-    ("device", lambda device_count, session_count: list(range(device_count))),
+    ("overview", lambda device_count, session_count, panel_count: [None]),
+    ("agents", lambda device_count, session_count, panel_count: agent_pages(session_count)),
+    ("device", lambda device_count, session_count, panel_count: list(range(device_count))),
+    ("plugin", lambda device_count, session_count, panel_count: list(range(panel_count))),
 )
 
 
-def page_ring(device_count, session_count):
+def page_ring(device_count, session_count, panel_count=0):
     """The pages a tap cycles through: the overview, then the agents pages
-    (none without sessions), then one page per device. Built from
-    PAGE_PROVIDERS, in registration order."""
+    (none without sessions), then one page per device, then one page per
+    loaded plugin panel. Built from PAGE_PROVIDERS, in registration order."""
     ring = []
     for kind, enumerate_pages in PAGE_PROVIDERS:
-        for value in enumerate_pages(device_count, session_count):
+        for value in enumerate_pages(device_count, session_count, panel_count):
             ring.append((kind, value))
     return ring
 
@@ -424,12 +427,19 @@ def fit_text(text, max_w, measure):
         return ""
     if measure(text) <= max_w:
         return text
-    # drop characters from the end until the text plus the ellipsis fits
-    for end in range(len(text) - 1, 0, -1):
-        candidate = text[:end].rstrip() + ELLIPSIS
-        if measure(candidate) <= max_w:
-            return candidate
-    return ""
+    # binary search for the longest prefix that fits with the ellipsis, so a
+    # 48-character text costs about 7 measurements, not 47 (security review
+    # MEDIUM-1); low always fits (0 means nothing does), high never does
+    low, high = 0, len(text)
+    while high - low > 1:
+        middle = (low + high) // 2
+        if measure(text[:middle].rstrip() + ELLIPSIS) <= max_w:
+            low = middle
+        else:
+            high = middle
+    if low == 0:
+        return ""
+    return text[:low].rstrip() + ELLIPSIS
 
 
 def should_focus_agents(prev_states, new_states, last_tap, now):
@@ -453,10 +463,10 @@ def should_focus_agents(prev_states, new_states, last_tap, now):
 # unchanged.
 
 
-def page_keys(ring, devices):
+def page_keys(ring, devices, panels=()):
     """A stable key per page, so the current page survives sessions and
-    devices coming and going: ("overview", None), ("agents", n) or
-    ("device", device_id)."""
+    devices coming and going: ("overview", None), ("agents", n),
+    ("device", device_id) or ("plugin", plugin name)."""
     keys = []
     agents_index = 0
     for kind, value in ring:
@@ -465,6 +475,8 @@ def page_keys(ring, devices):
             agents_index += 1
         elif kind == "device":
             keys.append(("device", devices[value].get("device_id")))
+        elif kind == "plugin":
+            keys.append(("plugin", panels[value]["plugin"]))
         else:
             keys.append(("overview", None))
     return keys

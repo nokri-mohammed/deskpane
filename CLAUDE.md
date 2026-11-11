@@ -94,7 +94,13 @@ reporter/tests/
   battery_env.rs      runs report with BATTERY from the environment and the older unit shapes
                       against a fake pisugar socket; the reporter unit passes no --battery
 pi/
-  dashboard.py        reads the socket, draws an overview page, then one device per page
+  dashboard.py        reads the socket, draws an overview page, then one device per page, then
+                      one page per plugin panel turned on in PANELS (draw_plugin_page)
+  panels.py           pure, stdlib only: plugin panel files (docs/PANELS.md): load_panel
+                      (validator, caps, closed format grammar HIGH-1), format_value,
+                      pick_style, fill_fraction, panel_values, parse_panels_setting,
+                      load_enabled_panels (tomllib: Python 3.11+, skips cleanly on 3.7)
+  deskpane_contract.py Python mirror of the wire contract: parse_socket_line, parse_metrics
   layout.py           pure helpers, no pygame: read_version, overview_layout (with the agents
                       line), version_position; battery (T-064): battery_fields, local_battery,
                       battery_style (red under 20), battery_geometry, bolt_points,

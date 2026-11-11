@@ -21,7 +21,9 @@ import pygame
 
 import charpack
 import display
+import panels
 import sprites
+from deskpane_contract import parse_metrics
 from layout import (
     agent_line2,
     agent_rows_layout,
@@ -56,6 +58,10 @@ SOCKET_PATH = os.environ.get("SOCKET_PATH", "/run/deskpane/daemon.sock")
 CHARACTERS_DIR = os.environ.get("CHARACTERS_DIR", "/var/lib/deskpane/characters")
 # the interface NetworkMonitor checks; "none" (the PC preview) means always ok
 NET_IFACE = os.environ.get("NET_IFACE", "wlan0")
+# plugin pages turned on (from /etc/deskpane/env, the same list the daemon reads)
+PANELS = os.environ.get("PANELS", "")
+# where the release keeps plugin panel files: <dir>/<name>/panel/<name>.panel.toml
+PLUGINS_DIR = os.environ.get("PLUGINS_DIR", "/opt/deskpane/current/plugins")
 
 # A full 320x480 RGB565 frame (307KB) takes ~150ms to physically transfer
 # over the SPI bus at 16MHz. Redrawing faster than that interrupts the panel
@@ -229,6 +235,8 @@ class SocketReader:
         self._lock = threading.Lock()
         self._devices = []
         self._sessions = []
+        # plugin name -> its metrics (deskpane_contract.parse_metrics)
+        self._metrics = {}
         # counts good lines, so the main loop sees when a new one arrived
         self._line_no = 0
         self._connected = False
@@ -253,8 +261,10 @@ class SocketReader:
                     parsed = parse_socket_line(decoded)
                     if parsed is None:
                         continue
+                    metrics = parse_metrics(decoded)
                     with self._lock:
                         self._devices, self._sessions = parsed
+                        self._metrics = metrics
                         self._line_no += 1
             except OSError:
                 pass
@@ -270,6 +280,11 @@ class SocketReader:
     def sessions(self):
         with self._lock:
             return list(self._sessions)
+
+    @property
+    def metrics(self):
+        with self._lock:
+            return dict(self._metrics)
 
     @property
     def line_no(self):
@@ -950,8 +965,13 @@ class PanelFrame:
     """Everything a panel draw needs for one frame, built once per frame."""
 
     def __init__(self, fonts, devices, connected, sorted_sessions, scene,
-                 agent_rows_all, keys, page_key, views, version, t0, now, width, height):
+                 agent_rows_all, keys, page_key, views, version, t0, now, width, height,
+                 plugin_panels=(), metrics=None):
         self.fonts = fonts
+        # the loaded plugin panels (panels.load_enabled_panels) and this
+        # frame's metrics view (deskpane_contract.parse_metrics)
+        self.plugin_panels = plugin_panels
+        self.metrics = metrics if metrics is not None else {}
         self.devices = devices
         self.connected = connected
         self.sorted_sessions = sorted_sessions
@@ -989,11 +1009,138 @@ def draw_device_panel(surface, value, frame):
     view.render(surface, device, frame.fonts, frame.t0, frame.now, frame.width, frame.height)
 
 
+# ---- plugin pages: the declarative renderer ----
+#
+# deskpane draws the header (title, clock) and the page dots; the panel's
+# elements draw only inside the 480 x 256 content rect between them (D7), on
+# a subsurface so nothing a panel says can draw outside it. Every element was
+# checked by panels.load_panel; this code only draws.
+
+PLUGIN_HEADER_H = 40
+# fitted text per (text, max width, size): literals are fitted once, not every frame
+FIT_CACHE = {}
+FIT_CACHE_MAX = 512
+# plugin name -> slow frames in a row; names in SLOW_PANELS draw a placeholder
+SLOW_STREAKS = {}
+SLOW_PANELS = set()
+
+
+def fit_cached(text, max_w, size, font):
+    """fit_text with a bounded cache (security review MEDIUM-1)."""
+    key = (text, max_w, size)
+    fitted = FIT_CACHE.get(key)
+    if fitted is None:
+        if len(FIT_CACHE) >= FIT_CACHE_MAX:
+            FIT_CACHE.clear()
+        fitted = fit_text(text, max_w, lambda candidate: font.size(candidate)[0])
+        FIT_CACHE[key] = fitted
+    return fitted
+PALETTE = {"TEXT": TEXT, "SUBTEXT": SUBTEXT, "ACCENT": ACCENT, "WARN": WARN, "CRIT": CRIT}
+PLUGIN_RING_THICKNESS = 10
+
+
+def draw_plugin_icon(surface, name, box_x, box_y, color):
+    """One built-in icon, centred in its ICON_BOX square at (box_x, box_y)."""
+    center = (box_x + panels.ICON_BOX // 2, box_y + panels.ICON_BOX // 2)
+    if name == "up":
+        draw_up_icon(surface, center, color)
+    elif name == "temp":
+        draw_temp_icon(surface, center, color, BG)
+    elif name == "disk":
+        draw_disk_icon(surface, center, color)
+    else:
+        draw_network_icon(surface, center, color)
+
+
+def draw_plugin_element(content, element, values, fonts):
+    """One checked panel element on the content subsurface."""
+    kind = element["kind"]
+    bind = element.get("bind")
+    value = values.get(bind) if bind is not None else None
+    color_name, icon = panels.pick_style(element, value)
+    color = PALETTE[color_name]
+
+    if kind == "text":
+        font = fonts[element["size"]]
+        if element["text"] is not None:
+            text = element["text"]
+        elif value is None:
+            text = element["missing"]
+            color = SUBTEXT
+        else:
+            text = panels.render_format(element["format"], value)
+        text = fit_cached(text, panels.CONTENT_W - element["x"], element["size"], font)
+        content.blit(font.render(text, True, color), (element["x"], element["y"]))
+
+    elif kind == "ring":
+        fraction = panels.fill_fraction(value, element["min"], element["max"])
+        if value is None:
+            value_text = "--"
+            color = SUBTEXT
+        else:
+            value_text = panels.format_value(value, None)
+        draw_ring_gauge(content, (element["cx"], element["cy"]), element["r"], fraction * 100.0, color,
+                        PLUGIN_RING_THICKNESS, element["label"] or "", value_text, fonts["big"], fonts["small"])
+
+    elif kind == "bar":
+        x, y, w, h = element["x"], element["y"], element["w"], element["h"]
+        radius = min(7, h // 2)
+        pygame.draw.rect(content, CARD, (x, y, w, h), border_radius=radius)
+        fill_w = int(w * panels.fill_fraction(value, element["min"], element["max"]))
+        if fill_w > 0:
+            pygame.draw.rect(content, color, (x, y, fill_w, h), border_radius=radius)
+
+    else:
+        draw_plugin_icon(content, icon, element["x"], element["y"], color)
+
+
+def draw_plugin_page(surface, panel, metrics, fonts, width, height):
+    """A whole plugin page: the host header, then the panel's elements."""
+    surface.fill(BG)
+    font_mid, font_small = fonts["mid"], fonts["small"]
+
+    clk_surf = font_small.render(time.strftime("%H:%M:%S"), True, SUBTEXT)
+    clk_x = width - clk_surf.get_width() - 14
+    surface.blit(clk_surf, (clk_x, 12))
+    title = fit_cached(panel["title"], clk_x - 28, "mid", font_mid)
+    surface.blit(font_mid.render(title, True, TEXT), (14, 8))
+    pygame.draw.line(surface, ROW_LINE, (0, PLUGIN_HEADER_H - 1), (width, PLUGIN_HEADER_H - 1), 1)
+
+    content_h = min(panels.CONTENT_H, height - PLUGIN_HEADER_H)
+    content = surface.subsurface((0, PLUGIN_HEADER_H, min(panels.CONTENT_W, width), content_h))
+    if panel["plugin"] in SLOW_PANELS:
+        line = font_small.render("this panel is too slow to draw", True, SUBTEXT)
+        content.blit(line, (24, 24))
+        return
+    values = panels.panel_values(panel, metrics)
+    for element in panel["elements"]:
+        draw_plugin_element(content, element, values, fonts)
+
+
+def draw_plugin_panel(surface, value, frame):
+    """One plugin page; value is the index in the loaded panel list. Each
+    draw is timed: a panel over the budget for several frames in a row is
+    replaced by a placeholder until the dashboard restarts, logged once."""
+    panel = frame.plugin_panels[value]
+    started = time.monotonic()
+    draw_plugin_page(surface, panel, frame.metrics, frame.fonts, frame.width, frame.height)
+    name = panel["plugin"]
+    if name in SLOW_PANELS:
+        return
+    streak, tripped = panels.step_draw_budget(SLOW_STREAKS.get(name, 0), time.monotonic() - started)
+    SLOW_STREAKS[name] = streak
+    if tripped:
+        SLOW_PANELS.add(name)
+        print("dashboard: panel %s drew slower than %.0f ms %d frames in a row, showing a placeholder"
+              % (name, panels.DRAW_BUDGET_S * 1000, panels.DRAW_BUDGET_FRAMES), file=sys.stderr, flush=True)
+
+
 # kind -> draw, one entry per layout.PAGE_PROVIDERS kind, in the same order
 PANEL_DRAW = {
     "overview": draw_overview_panel,
     "agents": draw_agents_panel,
     "device": draw_device_panel,
+    "plugin": draw_plugin_panel,
 }
 
 
@@ -1024,6 +1171,11 @@ def main(screen=None):
     page = 0
     last_taps = 0
     last_tap_at = None
+
+    # plugin pages turned on in PANELS; a missing or bad panel is skipped with a line
+    def log_line(line):
+        print(line, file=sys.stderr, flush=True)
+    plugin_panels = panels.load_enabled_panels(panels.parse_panels_setting(PANELS), PLUGINS_DIR, log_line)
 
     # agents: pack, looks and tracker; states of the last line for the focus jump
     scene = AgentScene(load_pack())
@@ -1082,10 +1234,10 @@ def main(screen=None):
                                            "last_tap": last_tap_at, "blocked": showing_problem}, now)
                 prev_states = new_states
 
-            # the page ring: overview, agents pages, devices
+            # the page ring: overview, agents pages, devices, plugin pages
             agent_rows_all = scene.rows(sorted_sessions, now)
-            ring = page_ring(len(devices), len(agent_rows_all))
-            keys = page_keys(ring, devices)
+            ring = page_ring(len(devices), len(agent_rows_all), len(plugin_panels))
+            keys = page_keys(ring, devices, plugin_panels)
             # an expired focus returns; a page that has gone falls back
             focus = step_focus(focus, {"kind": "tick", "keys": keys}, now)
 
@@ -1119,7 +1271,8 @@ def main(screen=None):
                     # dispatch to the registered panel for this page kind; the
                     # frame carries the data and fonts the draw needs
                     frame = PanelFrame(fonts, devices, reader.connected, sorted_sessions, scene,
-                                       agent_rows_all, keys, page_key, views, version, t0, now, width, height)
+                                       agent_rows_all, keys, page_key, views, version, t0, now, width, height,
+                                       plugin_panels=plugin_panels, metrics=reader.metrics)
                     PANEL_DRAW[kind](surface, value, frame)
                     draw_page_dots(surface, page, total_pages, width, height)
 
