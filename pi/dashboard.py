@@ -20,17 +20,25 @@ import traceback
 import pygame
 
 import charpack
+import display
 import sprites
-from fb_display import FrameBuffer, detect_touchscreen_fb
 from layout import (
     agent_line2,
     agent_rows_layout,
     agent_style,
     agent_summary,
     agent_title,
+    BATTERY_MARGIN,
+    battery_fields,
+    battery_geometry,
+    battery_style,
+    battery_widget_layout,
+    bolt_points,
     fit_text,
     fmt_elapsed,
     focus_state,
+    host_max_w,
+    local_battery,
     overview_layout,
     page_keys,
     page_ring,
@@ -46,7 +54,8 @@ from touch import TouchWatcher
 SOCKET_PATH = os.environ.get("SOCKET_PATH", "/run/deskpane/daemon.sock")
 # installed by install.sh --characters; root owned, read only for us
 CHARACTERS_DIR = os.environ.get("CHARACTERS_DIR", "/var/lib/deskpane/characters")
-FB_PATH = os.environ.get("FB_PATH") or detect_touchscreen_fb() or "/dev/fb1"
+# the interface NetworkMonitor checks; "none" (the PC preview) means always ok
+NET_IFACE = os.environ.get("NET_IFACE", "wlan0")
 
 # A full 320x480 RGB565 frame (307KB) takes ~150ms to physically transfer
 # over the SPI bus at 16MHz. Redrawing faster than that interrupts the panel
@@ -286,7 +295,17 @@ class NetworkMonitor:
         self._lock = threading.Lock()
         self._ok = True
         self._reason = "ok"
-        threading.Thread(target=self._loop, daemon=True).start()
+        # the preview's N key forces a problem, whatever the interface says
+        self._forced = False
+        # NET_IFACE=none: nothing to check, the link counts as up
+        if iface != "none":
+            threading.Thread(target=self._loop, daemon=True).start()
+
+    def toggle_forced(self):
+        """Turns the forced problem on or off; returns the new setting."""
+        with self._lock:
+            self._forced = not self._forced
+            return self._forced
 
     def _check(self):
         try:
@@ -326,11 +345,13 @@ class NetworkMonitor:
     @property
     def ok(self):
         with self._lock:
-            return self._ok
+            return self._ok and not self._forced
 
     @property
     def reason(self):
         with self._lock:
+            if self._forced:
+                return "forced by the preview (N)"
             return self._reason
 
 
@@ -407,6 +428,29 @@ def draw_disk_icon(surface, pos, color):
     pygame.draw.circle(surface, color, (x, y), 10, 2)
     pygame.draw.circle(surface, color, (x, y), 2)
     pygame.draw.line(surface, color, (x, y), (x + 8, y - 6), 2)
+
+
+def draw_battery(surface, font, right, top, pct, charging):
+    """The battery icon with its percent on the left (and a bolt left of
+    that while charging), ending at x = right, on one line starting at
+    y = top. Shapes and colours come from layout.py. Returns the x where
+    the widget starts, so callers can keep clear."""
+    style = battery_style(pct, charging)
+    color = CRIT if style["low"] else TEXT
+    text_surf = font.render(style["text"], True, color)
+    place = battery_widget_layout(right, top, text_surf.get_width(), text_surf.get_height(),
+                                  charging=style["charging"])
+    surface.blit(text_surf, place["text"])
+
+    x, y = place["icon"]
+    shapes = battery_geometry(x, y, pct)
+    pygame.draw.rect(surface, SUBTEXT, shapes["body"], 1)
+    pygame.draw.rect(surface, SUBTEXT, shapes["nub"])
+    if shapes["fill"] is not None:
+        pygame.draw.rect(surface, color, shapes["fill"])
+    if place["bolt"] is not None:
+        pygame.draw.polygon(surface, WARN, bolt_points(place["bolt"][0], place["bolt"][1]))
+    return place["left"]
 
 
 def draw_page_dots(surface, index, count, width, height):
@@ -491,6 +535,11 @@ def draw_overview(surface, fonts, devices, connected, t0, now, width, height, ve
     # version in the free bottom-left corner (dots bottom centre, network icon bottom right)
     version_surf = fonts["tiny"].render(version_text(version), True, SUBTEXT)
     surface.blit(version_surf, version_position(height, version_surf.get_height()))
+
+    # this Pi's own battery in the free top-right corner, nothing without one
+    battery = local_battery(devices)
+    if battery is not None:
+        draw_battery(surface, fonts["tiny"], width - BATTERY_MARGIN, BATTERY_MARGIN, battery[0], battery[1])
 
 
 def dim_color(color, factor=0.55):
@@ -823,16 +872,26 @@ class DeviceView:
             surface.blit(msg, (width // 2 - msg.get_width() // 2, height // 2 - 10))
             return
 
-        host_surf = font_mid.render(device.get("hostname", ""), True, TEXT)
+        clock_str = time.strftime("%H:%M:%S")
+        clk_surf = font_small.render(clock_str, True, SUBTEXT)
+        clk_x = width - clk_surf.get_width() - 14
+        surface.blit(clk_surf, (clk_x, 14))
+
+        # the device's battery left of the clock, nothing without one
+        clear_x = clk_x
+        battery = battery_fields(device)
+        if battery is not None:
+            clear_x = draw_battery(surface, font_tiny, clk_x - 10, 14, battery[0], battery[1])
+
+        # the hostname, cut so it ends clear of the battery (or the clock)
+        host = fit_text(device.get("hostname", ""), host_max_w(14, clear_x),
+                        lambda text: font_mid.size(text)[0])
+        host_surf = font_mid.render(host, True, TEXT)
         surface.blit(host_surf, (14, 10))
         tag_surf = font_tiny.render(device.get("label", ""), True, ACCENT)
         surface.blit(tag_surf, (14, 36))
         ip_surf = font_small.render(device.get("ip", ""), True, SUBTEXT)
         surface.blit(ip_surf, (14 + tag_surf.get_width() + 8, 35))
-
-        clock_str = time.strftime("%H:%M:%S")
-        clk_surf = font_small.render(clock_str, True, SUBTEXT)
-        surface.blit(clk_surf, (width - clk_surf.get_width() - 14, 14))
 
         draw_pulse_dot(surface, (width - 14, 40), t0, now)
 
@@ -875,9 +934,76 @@ def load_pack():
         return None
 
 
-def main():
-    fb = FrameBuffer(path=FB_PATH)
-    surface = fb.surface_for_drawing()
+# ---- the panel registry: the draw half ----
+#
+# Each page on screen is drawn by a registered panel, keyed by the same kind
+# strings and in the same order as layout.PAGE_PROVIDERS (the ring half). A
+# panel draw takes (surface, value, frame): value is the ring value for that
+# page (None for the overview, an (start, end) slice for an agents page, a
+# device index for a device page), and frame carries this frame's data and
+# fonts. This is a pure indirection: the draw calls and their arguments are
+# exactly what the loop ran before, so the screen stays pixel-identical. Later
+# phases swap these draws for the declarative renderer without touching the loop.
+
+
+class PanelFrame:
+    """Everything a panel draw needs for one frame, built once per frame."""
+
+    def __init__(self, fonts, devices, connected, sorted_sessions, scene,
+                 agent_rows_all, keys, page_key, views, version, t0, now, width, height):
+        self.fonts = fonts
+        self.devices = devices
+        self.connected = connected
+        self.sorted_sessions = sorted_sessions
+        self.scene = scene
+        self.agent_rows_all = agent_rows_all
+        self.keys = keys
+        self.page_key = page_key
+        self.views = views
+        self.version = version
+        self.t0 = t0
+        self.now = now
+        self.width = width
+        self.height = height
+
+
+def draw_overview_panel(surface, value, frame):
+    """The overview page (value is None)."""
+    draw_overview(surface, frame.fonts, frame.devices, frame.connected, frame.t0, frame.now,
+                  frame.width, frame.height, frame.version, sessions=frame.sorted_sessions)
+
+
+def draw_agents_panel(surface, value, frame):
+    """One agents page; value is the (start, end) slice of the sorted rows."""
+    start, end = value
+    agent_page_count = len([key for key in frame.keys if key[0] == "agents"])
+    draw_agents(surface, frame.fonts, frame.scene, frame.agent_rows_all[start:end], frame.page_key[1],
+                agent_page_count, frame.t0, frame.now, frame.width, frame.height)
+
+
+def draw_device_panel(surface, value, frame):
+    """One device page; value is the device index."""
+    device = frame.devices[value]
+    view = frame.views.setdefault(device["device_id"], DeviceView())
+    view.ease(device)
+    view.render(surface, device, frame.fonts, frame.t0, frame.now, frame.width, frame.height)
+
+
+# kind -> draw, one entry per layout.PAGE_PROVIDERS kind, in the same order
+PANEL_DRAW = {
+    "overview": draw_overview_panel,
+    "agents": draw_agents_panel,
+    "device": draw_device_panel,
+}
+
+
+def main(screen=None):
+    """The dashboard loop. screen is a display from display.py; by default
+    DESKPANE_DISPLAY picks one, and the Pi (which sets nothing) gets the
+    framebuffer and evdev taps exactly as before."""
+    if screen is None:
+        screen = display.open_display()
+    surface = screen.surface_for_drawing()
     width, height = surface.get_size()
 
     fonts = load_fonts()
@@ -886,8 +1012,13 @@ def main():
     version = read_version(os.path.dirname(os.path.abspath(__file__)))
 
     reader = SocketReader()
-    touch = TouchWatcher(screen_size=(width, height))
-    net_monitor = NetworkMonitor()
+    # the window and png backends bring their own taps (mouse, keys, timer)
+    poll_events = getattr(screen, "poll_events", None)
+    if poll_events is None:
+        touch = TouchWatcher(screen_size=(width, height))
+    else:
+        touch = display.PointerTaps()
+    net_monitor = NetworkMonitor(iface=NET_IFACE)
 
     views = {}  # device_id -> DeviceView, built lazily on first sight
     page = 0
@@ -923,9 +1054,19 @@ def main():
             # SDL turns SIGINT/SIGTERM into a QUIT event rather than killing
             # the process outright -- drain it here so `systemctl stop` (and
             # Ctrl+C) actually exit the loop instead of hanging until SIGKILL.
-            for event in pygame.event.get():
+            events = pygame.event.get()
+            for event in events:
                 if event.type == pygame.QUIT:
                     return
+            # preview backends: clicks and timer taps, N for the network screen, quit
+            if poll_events is not None:
+                for action in poll_events(events):
+                    if action[0] == "quit":
+                        return
+                    if action[0] == "tap":
+                        touch.tap(action[1])
+                    elif action[0] == "net":
+                        showing_problem = net_monitor.toggle_forced()
 
             devices = sorted(reader.devices, key=lambda d: d.get("device_id", ""))
 
@@ -975,19 +1116,11 @@ def main():
                 if showing_problem:
                     draw_network_problem(surface, fonts, net_monitor.reason, width, height)
                 else:
-                    if kind == "overview":
-                        draw_overview(surface, fonts, devices, reader.connected, t0, now, width, height, version,
-                                      sessions=sorted_sessions)
-                    elif kind == "agents":
-                        start, end = value
-                        agent_page_count = len([key for key in keys if key[0] == "agents"])
-                        draw_agents(surface, fonts, scene, agent_rows_all[start:end], page_key[1],
-                                    agent_page_count, t0, now, width, height)
-                    else:
-                        device = devices[value]
-                        view = views.setdefault(device["device_id"], DeviceView())
-                        view.ease(device)
-                        view.render(surface, device, fonts, t0, now, width, height)
+                    # dispatch to the registered panel for this page kind; the
+                    # frame carries the data and fonts the draw needs
+                    frame = PanelFrame(fonts, devices, reader.connected, sorted_sessions, scene,
+                                       agent_rows_all, keys, page_key, views, version, t0, now, width, height)
+                    PANEL_DRAW[kind](surface, value, frame)
                     draw_page_dots(surface, page, total_pages, width, height)
 
                     if not net_monitor.ok:
@@ -1027,7 +1160,7 @@ def main():
                 msg = fonts["mid"].render(fallback_text, True, CRIT)
                 surface.blit(msg, (width // 2 - msg.get_width() // 2, height // 2 - 10))
 
-            fb.flip()
+            screen.flip()
             # 5 fps only while characters animate on the agents page
             if kind == "agents" and scene.pack is not None and not showing_problem:
                 clock.tick(AGENTS_FPS)
@@ -1036,7 +1169,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        fb.close()
+        screen.close()
 
 
 if __name__ == "__main__":

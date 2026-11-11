@@ -1,0 +1,39 @@
+# A deskpane plugin manifest. schema 1.
+#
+# This is the template a contributor copies with scripts/new-plugin.sh. It
+# declares everything up front so CI and the reviewer can check the code does
+# only what the manifest says (plan section 4). example-report is the simplest
+# kind: a data source that sends one device report, like the reference reporter.
+
+# the manifest schema version this file is written against (pinned in Phase 0)
+manifest_version = "1"
+
+name = "example-report"
+author = "deskpane"
+version = "0.1.0"
+
+# the contract and host-API versions this plugin targets; a plugin that names a
+# version the installed deskpane does not support is refused at load
+contract_version = "1"
+host_api_version = "1"
+
+# data-source | panel | both. This one only sends data, it draws no panel.
+kind = "data-source"
+license = "MIT"
+
+[declares]
+# the data this plugin puts on the wire and reads back. It publishes a whole
+# device report (the existing Report kind), so it appears on a device page with
+# no new panel; it reads nothing.
+publishes = ["device_report"]
+reads = []
+
+[declares.capabilities]
+# no outbound HTTP (it invents its demo numbers), and no panel timer
+http_get = []
+timer = false
+
+# the program CI builds and the Pi runs; it sends the "report" packet kind
+[entry.source]
+bin = "deskpane-example-report"
+packet_kind = "report"

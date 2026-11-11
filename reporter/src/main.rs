@@ -28,6 +28,10 @@ use services::claude_settings::{
 };
 use services::conflict::{ConflictStep, ConflictTracker};
 use services::machine_id::{derive_device_id, read_machine_id};
+#[cfg(unix)]
+use services::pisugar::{
+    PiSugarClient, Query, DEFAULT_SOCKET_PATH, QUERY_TIMEOUT, SOCKET_PATH_ENV,
+};
 use services::settings_file::{
     backup_file, read_json_file, write_atomically, FileStamp, LoadedJson,
 };
@@ -92,6 +96,11 @@ enum Command {
         /// Send one report, wait up to 3 s for the daemon's answer, and exit (0 ok, 10 id in use, 12 no answer)
         #[arg(long)]
         once: bool,
+        /// Add a battery reading to each report: none (or empty), or pisugar (pisugar-server's Unix socket, PISUGAR_SOCKET overrides the path; Linux only)
+        // the systemd unit sets it through BATTERY in /etc/deskpane/env, not on
+        // the command line, so an older binary after a rollback still starts
+        #[arg(long, env = "BATTERY", value_parser = parse_battery_source, default_value = "none")]
+        battery: BatterySource,
     },
     /// Claude Code hook: read the hook JSON on stdin and send one agent status packet. Always exits 0, prints nothing on stdout.
     #[command(args_conflicts_with_subcommands = true)]
@@ -101,6 +110,42 @@ enum Command {
         #[command(flatten)]
         hook: HookArgs,
     },
+}
+
+/// Where the battery reading of a report comes from (--battery).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum BatterySource {
+    // no battery fields in the reports
+    None,
+    // pisugar-server's Unix socket (a PiSugar board on a Raspberry Pi)
+    Pisugar,
+}
+
+/*
+ * reads a --battery value (or BATTERY). Empty counts as none, because the
+ * unit of the first T-064 build passed --battery ${BATTERY} and an
+ * /etc/deskpane/env from before T-064 has no BATTERY line; the reporter
+ * must still start then.
+ *
+ * value: e.g. "pisugar"
+ */
+fn parse_battery_source(value: &str) -> Result<BatterySource, String> {
+    if value.is_empty() || value == "none" {
+        return Ok(BatterySource::None);
+    }
+    if value == "pisugar" {
+        return Ok(BatterySource::Pisugar);
+    }
+    Err("expected none or pisugar".to_string())
+}
+
+/// One battery reading for a report.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Battery {
+    // percent, 0 to 100
+    pct: f64,
+    // true on external power, None when the board did not say
+    charging: Option<bool>,
 }
 
 /// The `deskpane agent` commands run by hand, to set up the hooks.
@@ -404,10 +449,30 @@ fn conflict_max_gap(interval_secs: u64) -> Duration {
     CONFLICT_MAX_GAP
 }
 
-// fill one Report from the current stats
-fn build_report(device_id: &str, label: &str, ip: &str, stats: &mut SystemStats) -> Report {
+/*
+ * fill one Report from the current stats
+ *
+ * battery: this cycle's battery reading; None leaves the battery fields out
+ */
+fn build_report(
+    device_id: &str,
+    label: &str,
+    ip: &str,
+    stats: &mut SystemStats,
+    battery: Option<Battery>,
+) -> Report {
     let (mem_used_mb, mem_total_mb) = stats.memory_mb();
     let (disk_used_gb, disk_total_gb) = stats.root_disk_gb();
+
+    let mut battery_pct: Option<f64> = None;
+    let mut charging: Option<bool> = None;
+    match battery {
+        Some(reading) => {
+            battery_pct = Some(reading.pct);
+            charging = reading.charging;
+        }
+        None => {}
+    }
 
     Report {
         device_id: device_id.to_string(),
@@ -421,6 +486,196 @@ fn build_report(device_id: &str, label: &str, ip: &str, stats: &mut SystemStats)
         disk_total_gb: disk_total_gb,
         temp_c: stats.cpu_temp_c(),
         uptime_s: SystemStats::uptime_s(),
+        battery_pct: battery_pct,
+        charging: charging,
+    }
+}
+
+/*
+ * true when this build can read the battery source: pisugar needs a Unix
+ * socket, so a Windows build refuses it as a usage error
+ */
+fn battery_supported(source: BatterySource) -> bool {
+    match source {
+        BatterySource::None => true,
+        BatterySource::Pisugar => cfg!(unix),
+    }
+}
+
+/*
+ * the log line for a battery state, printed only at start and when it
+ * changes, never every cycle
+ *
+ * previous: whether the last read worked, None before the first read
+ * ok: whether this read worked
+ * socket: the socket path, for the line
+ */
+#[cfg(unix)]
+fn battery_change_line(previous: Option<bool>, ok: bool, socket: &str) -> Option<String> {
+    // the first read always logs; later ones only when the state flips
+    let changed = match previous {
+        Some(was) => was != ok,
+        None => true,
+    };
+    if !changed {
+        return None;
+    }
+    if ok {
+        return Some(format!(
+            "deskpane: battery: reading pisugar-server at {socket}"
+        ));
+    }
+    Some(format!(
+        "deskpane: battery: no answer from pisugar-server at {socket}; reports go out without battery fields"
+    ))
+}
+
+/*
+ * the pisugar-server socket path: PISUGAR_SOCKET when it is an absolute
+ * path, else the default
+ *
+ * from_env: the variable's value, None when it is not set
+ */
+#[cfg(unix)]
+fn pisugar_socket_path(from_env: Option<String>) -> PathBuf {
+    match from_env {
+        Some(value) => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                return path;
+            }
+            eprintln!("deskpane: battery: {SOCKET_PATH_ENV} is not an absolute path, using {DEFAULT_SOCKET_PATH}");
+            PathBuf::from(DEFAULT_SOCKET_PATH)
+        }
+        None => PathBuf::from(DEFAULT_SOCKET_PATH),
+    }
+}
+
+// the other of the two plug queries
+#[cfg(unix)]
+fn other_plug_query(query: Query) -> Query {
+    match query {
+        Query::BatteryPowerPlugged => Query::BatteryCharging,
+        _ => Query::BatteryPowerPlugged,
+    }
+}
+
+/* how many cycles in a row the preferred plug query must come back empty
+ * before we switch to the other one. A single empty reply is a transient
+ * failure (timeout, truncated or unparseable reply), not proof the board does
+ * not support that query, so we do not switch on it: switching on one miss
+ * would pin a PiSugar 3 to the deprecated battery_charging query forever after
+ * one hiccup. A query that is genuinely wrong for the board misses every cycle,
+ * so it still switches after this many. */
+#[cfg(unix)]
+const PLUG_SWITCH_AFTER: u32 = 3;
+
+/// Reads the battery once per report cycle (--battery), logging only changes.
+#[cfg(unix)]
+struct BatteryProbe {
+    // None for --battery none
+    client: Option<PiSugarClient>,
+    // the plug query tried first (PiSugar 3 first)
+    plug_query: Query,
+    // cycles in a row the preferred plug query came back empty; resets on any
+    // answer. Only a sustained run switches the query (PLUG_SWITCH_AFTER).
+    plug_misses: u32,
+    // whether the last read worked, None before the first
+    last_ok: Option<bool>,
+}
+
+#[cfg(unix)]
+impl BatteryProbe {
+    fn new(source: BatterySource) -> Self {
+        let mut client: Option<PiSugarClient> = None;
+        match source {
+            BatterySource::None => {}
+            BatterySource::Pisugar => {
+                let from_env = env::var(SOCKET_PATH_ENV);
+                let value = match from_env {
+                    Ok(v) => Some(v),
+                    Err(_) => None,
+                };
+                let path = pisugar_socket_path(value);
+                client = Some(PiSugarClient::new(&path, QUERY_TIMEOUT));
+            }
+        }
+        BatteryProbe {
+            client: client,
+            plug_query: Query::BatteryPowerPlugged,
+            plug_misses: 0,
+            last_ok: None,
+        }
+    }
+
+    // this cycle's reading, or None (no source, no answer, bad reply)
+    fn read(&mut self) -> Option<Battery> {
+        let client = match &self.client {
+            Some(c) => c,
+            None => return None,
+        };
+
+        /* one budget (QUERY_TIMEOUT) for the whole cycle: a wedged server
+         * costs at most that once, and queries after it send nothing */
+        let deadline = client.deadline();
+        let mut reading: Option<Battery> = None;
+        let pct = client.battery_pct(deadline);
+        match pct {
+            Some(p) => {
+                // PiSugar 3 answers one plug query, the PiSugar 2 family the
+                // other. Try the preferred query first; only switch to the
+                // other after the preferred has missed PLUG_SWITCH_AFTER cycles
+                // in a row, so one transient miss uses the other query for this
+                // cycle without pinning us to it (code review finding).
+                let preferred = client.plugged(self.plug_query, deadline);
+                let charging;
+                match preferred {
+                    Some(value) => {
+                        self.plug_misses = 0;
+                        charging = Some(value);
+                    }
+                    None => {
+                        self.plug_misses = self.plug_misses.saturating_add(1);
+                        let other = other_plug_query(self.plug_query);
+                        let fallback = client.plugged(other, deadline);
+                        charging = fallback;
+                        if fallback.is_some() && self.plug_misses >= PLUG_SWITCH_AFTER {
+                            self.plug_query = other;
+                            self.plug_misses = 0;
+                        }
+                    }
+                }
+                reading = Some(Battery {
+                    pct: p,
+                    charging: charging,
+                });
+            }
+            None => {}
+        }
+
+        let socket = client.socket_path().display().to_string();
+        let line = battery_change_line(self.last_ok, reading.is_some(), &socket);
+        match line {
+            Some(text) => eprintln!("{text}"),
+            None => {}
+        }
+        self.last_ok = Some(reading.is_some());
+        reading
+    }
+}
+
+/// Windows has no pisugar socket: main refuses --battery pisugar there.
+#[cfg(not(unix))]
+struct BatteryProbe {}
+
+#[cfg(not(unix))]
+impl BatteryProbe {
+    fn new(_source: BatterySource) -> Self {
+        BatteryProbe {}
+    }
+
+    fn read(&mut self) -> Option<Battery> {
+        None
     }
 }
 
@@ -514,15 +769,18 @@ fn review_replies(replies: &[Vec<u8>], device_id: &str) -> ReplyReview {
  * device_id: stable id the dashboard tracks this device by, e.g. pi-zero
  * label: short name shown on the dashboard, e.g. Pi
  * interval_secs: seconds to wait between reports
+ * battery: where each report's battery reading comes from
  */
-fn run(daemon: &str, device_id: &str, label: &str, interval_secs: u64) {
+fn run(daemon: &str, device_id: &str, label: &str, interval_secs: u64, battery: BatterySource) {
     let client = UdpClient::new(daemon);
     let ip = client.local_ip();
     let mut stats = SystemStats::new();
+    let mut probe = BatteryProbe::new(battery);
     let mut tracker = ConflictTracker::new(CONFLICT_GRACE, conflict_max_gap(interval_secs));
 
     loop {
-        let report = build_report(device_id, label, &ip, &mut stats);
+        let reading = probe.read();
+        let report = build_report(device_id, label, &ip, &mut stats, reading);
         send_report(&client, report, false);
 
         // replies to earlier reports; never waits on the network
@@ -564,14 +822,16 @@ fn run(daemon: &str, device_id: &str, label: &str, interval_secs: u64) {
  * sends one report that asks for an answer, waits up to ONCE_WAIT, and
  * exits: 0 acknowledged, 10 id in use, 12 no answer
  *
- * daemon, device_id, label: as for run
+ * daemon, device_id, label, battery: as for run
  */
-fn report_once(daemon: &str, device_id: &str, label: &str) {
+fn report_once(daemon: &str, device_id: &str, label: &str, battery: BatterySource) {
     let client = UdpClient::new(daemon);
     let ip = client.local_ip();
     let mut stats = SystemStats::new();
+    let mut probe = BatteryProbe::new(battery);
 
-    let report = build_report(device_id, label, &ip, &mut stats);
+    let reading = probe.read();
+    let report = build_report(device_id, label, &ip, &mut stats, reading);
     send_report(&client, report, true);
 
     // check for the answer every ONCE_POLL until ONCE_WAIT is over
@@ -1346,7 +1606,14 @@ fn main() {
             label,
             interval,
             once,
+            battery,
         } => {
+            // a battery source this build cannot read is a usage error
+            if !battery_supported(battery) {
+                eprintln!("deskpane: error: --battery pisugar needs a Unix socket and works on Linux only");
+                std::process::exit(EXIT_USAGE);
+            }
+
             // an id typed by hand vs one derived from the machine id, for the startup line
             let automatic = is_missing(&device_id);
 
@@ -1366,7 +1633,7 @@ fn main() {
             };
 
             if once {
-                report_once(&daemon, &resolved_id, &resolved_label);
+                report_once(&daemon, &resolved_id, &resolved_label, battery);
                 return;
             }
 
@@ -1379,7 +1646,7 @@ fn main() {
             println!(
                 "deskpane: reporting to {daemon} as {resolved_id} ({how}, label \"{resolved_label}\") every {interval}s"
             );
-            run(&daemon, &resolved_id, &resolved_label, interval);
+            run(&daemon, &resolved_id, &resolved_label, interval, battery);
         }
     }
 }
@@ -1393,6 +1660,348 @@ mod tests {
     // shorthand for the tests: an owned Option from a str
     fn some(text: &str) -> Option<String> {
         Some(text.to_string())
+    }
+
+    // ---- battery (T-064) ----
+
+    #[test]
+    fn battery_none_is_always_supported() {
+        assert!(battery_supported(BatterySource::None));
+        assert_eq!(battery_supported(BatterySource::Pisugar), cfg!(unix));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn battery_line_at_start_and_on_change_only() {
+        let path = "/run/pisugar/pisugar-server.sock";
+        let first = battery_change_line(None, true, path).unwrap();
+        assert!(first.contains("reading pisugar-server at /run/pisugar/pisugar-server.sock"));
+        assert_eq!(battery_change_line(Some(true), true, path), None);
+        let lost = battery_change_line(Some(true), false, path).unwrap();
+        assert!(lost.contains("no answer"));
+        assert_eq!(battery_change_line(Some(false), false, path), None);
+        assert!(battery_change_line(None, false, path).is_some());
+    }
+
+    #[test]
+    fn report_carries_the_battery_only_when_read() {
+        let mut stats = SystemStats::new();
+        let without = build_report("pi-zero", "Pi", "", &mut stats, None);
+        assert_eq!(without.battery_pct, None);
+        assert_eq!(without.charging, None);
+
+        let reading = Battery {
+            pct: 87.0,
+            charging: Some(true),
+        };
+        let with = build_report("pi-zero", "Pi", "", &mut stats, Some(reading));
+        assert_eq!(with.battery_pct, Some(87.0));
+        assert_eq!(with.charging, Some(true));
+    }
+
+    #[test]
+    fn battery_flag_parses_and_defaults_to_none() {
+        let cli =
+            Cli::try_parse_from(["deskpane", "report", "--daemon", "127.0.0.1:8765"]).unwrap();
+        match cli.command {
+            Command::Report { battery, .. } => assert_eq!(battery, BatterySource::None),
+            _ => panic!("expected report"),
+        }
+        let cli = Cli::try_parse_from([
+            "deskpane",
+            "report",
+            "--daemon",
+            "127.0.0.1:8765",
+            "--battery",
+            "pisugar",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Report { battery, .. } => assert_eq!(battery, BatterySource::Pisugar),
+            _ => panic!("expected report"),
+        }
+        let empty = Cli::try_parse_from([
+            "deskpane",
+            "report",
+            "--daemon",
+            "127.0.0.1:8765",
+            "--battery",
+            "",
+        ])
+        .unwrap();
+        match empty.command {
+            Command::Report { battery, .. } => assert_eq!(battery, BatterySource::None),
+            _ => panic!("expected report"),
+        }
+        let bad = Cli::try_parse_from([
+            "deskpane",
+            "report",
+            "--daemon",
+            "127.0.0.1:8765",
+            "--battery",
+            "acpi",
+        ]);
+        assert!(bad.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pisugar_socket_path_from_env_or_default() {
+        assert_eq!(
+            pisugar_socket_path(None),
+            PathBuf::from("/run/pisugar/pisugar-server.sock")
+        );
+        assert_eq!(
+            pisugar_socket_path(some("/tmp/pisugar-server.sock")),
+            PathBuf::from("/tmp/pisugar-server.sock")
+        );
+        assert_eq!(
+            pisugar_socket_path(some("relative.sock")),
+            PathBuf::from(DEFAULT_SOCKET_PATH)
+        );
+        assert_eq!(
+            pisugar_socket_path(some("")),
+            PathBuf::from(DEFAULT_SOCKET_PATH)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plug_queries_swap() {
+        assert_eq!(
+            other_plug_query(Query::BatteryPowerPlugged),
+            Query::BatteryCharging
+        );
+        assert_eq!(
+            other_plug_query(Query::BatteryCharging),
+            Query::BatteryPowerPlugged
+        );
+    }
+
+    /*
+     * one empty answer to the preferred plug query is treated as transient: the
+     * probe uses the other query's answer for this cycle but does NOT switch to
+     * it, so a PiSugar 3 hiccup does not pin it to the deprecated query. One
+     * miss leaves plug_query on battery_power_plugged with the miss counted.
+     */
+    #[cfg(unix)]
+    #[test]
+    fn probe_uses_the_other_query_on_one_miss_without_switching() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let path = PathBuf::from(format!("/tmp/phd-test-{}-probe.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let answers = ["battery: 45.2\n", "", "battery_charging: true\n"];
+            let mut commands: Vec<String> = Vec::new();
+            for answer in answers {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 64];
+                let n = stream.read(&mut buf).unwrap();
+                commands.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = stream.write_all(answer.as_bytes());
+            }
+            commands
+        });
+
+        let mut probe = BatteryProbe {
+            client: Some(PiSugarClient::new(&path, QUERY_TIMEOUT)),
+            plug_query: Query::BatteryPowerPlugged,
+            plug_misses: 0,
+            last_ok: None,
+        };
+        let reading = probe.read();
+        let commands = server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            reading,
+            Some(Battery {
+                pct: 45.2,
+                charging: Some(true)
+            })
+        );
+        // used the fallback for this cycle, but did not switch on one miss
+        assert_eq!(probe.plug_query, Query::BatteryPowerPlugged);
+        assert_eq!(probe.plug_misses, 1);
+        assert_eq!(probe.last_ok, Some(true));
+        assert_eq!(
+            commands,
+            vec![
+                "get battery\n".to_string(),
+                "get battery_power_plugged\n".to_string(),
+                "get battery_charging\n".to_string()
+            ]
+        );
+    }
+
+    /*
+     * a genuine PiSugar 2: the preferred plug query misses every cycle while
+     * battery_charging answers. After PLUG_SWITCH_AFTER cycles the probe adopts
+     * battery_charging and the miss counter resets.
+     */
+    #[cfg(unix)]
+    #[test]
+    fn probe_switches_after_the_preferred_query_misses_repeatedly() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let path = PathBuf::from(format!("/tmp/phd-test-{}-switch.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        // each cycle answers: battery, empty to the preferred query, then
+        // battery_charging. PLUG_SWITCH_AFTER cycles are three queries each.
+        let server = thread::spawn(move || {
+            let per_cycle = ["battery: 45.2\n", "", "battery_charging: true\n"];
+            let mut count = 0;
+            while count < (PLUG_SWITCH_AFTER as usize) * per_cycle.len() {
+                let answer = per_cycle[count % per_cycle.len()];
+                let accepted = listener.accept();
+                let mut stream = match accepted {
+                    Ok((stream, _)) => stream,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 64];
+                let read = stream.read(&mut buf);
+                match read {
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                let _ = stream.write_all(answer.as_bytes());
+                count += 1;
+            }
+        });
+
+        let mut probe = BatteryProbe {
+            client: Some(PiSugarClient::new(&path, QUERY_TIMEOUT)),
+            plug_query: Query::BatteryPowerPlugged,
+            plug_misses: 0,
+            last_ok: None,
+        };
+        // read PLUG_SWITCH_AFTER times; the last one crosses the threshold
+        let mut cycle = 0;
+        while cycle < PLUG_SWITCH_AFTER {
+            let reading = probe.read();
+            assert_eq!(reading.map(|b| b.charging), Some(Some(true)));
+            cycle += 1;
+        }
+        let _ = server.join();
+        let _ = std::fs::remove_file(&path);
+
+        // after the run of misses, the probe adopted the other query and reset
+        assert_eq!(probe.plug_query, Query::BatteryCharging);
+        assert_eq!(probe.plug_misses, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_with_a_missing_socket_reads_nothing() {
+        let path = PathBuf::from(format!("/tmp/phd-test-{}-nosock.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut probe = BatteryProbe {
+            client: Some(PiSugarClient::new(&path, QUERY_TIMEOUT)),
+            plug_query: Query::BatteryPowerPlugged,
+            plug_misses: 0,
+            last_ok: None,
+        };
+        assert_eq!(probe.read(), None);
+        assert_eq!(probe.last_ok, Some(false));
+    }
+
+    /*
+     * a wedged pisugar-server: the socket exists and connect works (the
+     * kernel queues it), but nothing is ever accepted or answered. One cycle
+     * shares one 300 ms budget, so the plug queries never add their own.
+     */
+    #[cfg(unix)]
+    #[test]
+    fn probe_against_a_server_that_never_answers_takes_one_budget() {
+        use std::os::unix::net::UnixListener;
+
+        let path = PathBuf::from(format!("/tmp/phd-test-{}-wedged.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut probe = BatteryProbe {
+            client: Some(PiSugarClient::new(&path, QUERY_TIMEOUT)),
+            plug_query: Query::BatteryPowerPlugged,
+            plug_misses: 0,
+            last_ok: None,
+        };
+
+        let started = Instant::now();
+        let reading = probe.read();
+        let took = started.elapsed();
+        drop(listener);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(reading, None);
+        assert!(took < Duration::from_millis(450), "took {took:?}");
+    }
+
+    /*
+     * the percent answers, then the server wedges: both plug queries share
+     * what is left of the cycle's budget instead of 300 ms each
+     */
+    #[cfg(unix)]
+    #[test]
+    fn probe_skips_the_plug_queries_once_the_budget_is_spent() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let path = PathBuf::from(format!("/tmp/phd-test-{}-wedge2.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            // answer the percent, then hold every later connection unanswered
+            let mut held: Vec<std::os::unix::net::UnixStream> = Vec::new();
+            let (mut first, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let _ = first.read(&mut buf).unwrap();
+            let _ = first.write_all(b"battery: 61\n");
+            listener.set_nonblocking(true).unwrap();
+            let until = Instant::now() + Duration::from_millis(1000);
+            while Instant::now() < until {
+                let accepted = listener.accept();
+                match accepted {
+                    Ok((stream, _)) => held.push(stream),
+                    Err(_) => thread::sleep(Duration::from_millis(5)),
+                }
+            }
+            held.len()
+        });
+
+        let mut probe = BatteryProbe {
+            client: Some(PiSugarClient::new(&path, QUERY_TIMEOUT)),
+            plug_query: Query::BatteryPowerPlugged,
+            plug_misses: 0,
+            last_ok: None,
+        };
+        let started = Instant::now();
+        let reading = probe.read();
+        let took = started.elapsed();
+        let _ = server.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            reading,
+            Some(Battery {
+                pct: 61.0,
+                charging: None
+            })
+        );
+        assert!(took < Duration::from_millis(450), "took {took:?}");
+        // the query that did not answer stays the first choice
+        assert_eq!(probe.plug_query, Query::BatteryPowerPlugged);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_without_a_source_reads_nothing() {
+        let mut probe = BatteryProbe::new(BatterySource::None);
+        assert_eq!(probe.read(), None);
+        assert_eq!(probe.last_ok, None);
     }
 
     // ---- identity (T-032) ----

@@ -18,6 +18,12 @@ pub struct Report {
     pub disk_total_gb: f64,
     pub temp_c: f64,
     pub uptime_s: f64,
+    // battery charge in percent, 0 to 100; left out by devices without one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_pct: Option<f64>,
+    // true while on external power; left out when unknown
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charging: Option<bool>,
 }
 
 /// What the daemon pushes to the dashboard over the Unix socket
@@ -26,6 +32,9 @@ pub struct DeviceStatus {
     #[serde(flatten)]
     pub report: Report,
     pub online: bool,
+    // true when the report came from a loopback address (the Pi itself)
+    #[serde(default)]
+    pub local: bool,
 }
 
 /// What arrives over UDP: a report plus optional request flags. `Report`
@@ -116,6 +125,8 @@ pub const MAX_NAME_BYTES: usize = 64;
 pub const MAX_IP_BYTES: usize = 45;
 pub const MIN_TEMP_C: f64 = -50.0;
 pub const MAX_TEMP_C: f64 = 150.0;
+pub const MIN_BATTERY_PCT: f64 = 0.0;
+pub const MAX_BATTERY_PCT: f64 = 100.0;
 // used may be up to 1% above total, to allow for rounding on the device
 pub const USED_OVER_TOTAL_TOLERANCE: f64 = 1.01;
 
@@ -197,6 +208,18 @@ pub fn validate(report: &Report) -> Result<(), String> {
     match uptime_checked {
         Ok(()) => {}
         Err(reason) => return Err(reason),
+    }
+
+    // battery is optional; when sent it is a finite percent (charging is any bool)
+    match report.battery_pct {
+        Some(pct) => {
+            let battery_checked = check_range("battery_pct", pct, MIN_BATTERY_PCT, MAX_BATTERY_PCT);
+            match battery_checked {
+                Ok(()) => {}
+                Err(reason) => return Err(reason),
+            }
+        }
+        None => {}
     }
 
     Ok(())
@@ -725,6 +748,8 @@ mod tests {
             disk_total_gb: 500.0,
             temp_c: 45.0,
             uptime_s: 123456.0,
+            battery_pct: None,
+            charging: None,
         }
     }
 
@@ -1144,6 +1169,76 @@ mod tests {
         assert!(check_device_id(&"a".repeat(65)).is_err());
     }
 
+    // ---- battery (T-064) ----
+
+    #[test]
+    fn report_without_battery_passes_and_sends_no_battery_keys() {
+        let report = valid_report();
+        assert_accepted(&report);
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("battery_pct").is_none());
+        assert!(json.get("charging").is_none());
+    }
+
+    #[test]
+    fn battery_boundaries_pass() {
+        let mut report = valid_report();
+        report.battery_pct = Some(0.0);
+        report.charging = Some(false);
+        assert_accepted(&report);
+        report.battery_pct = Some(100.0);
+        report.charging = Some(true);
+        assert_accepted(&report);
+        // charging alone (a board that gave no percent) is harmless
+        report.battery_pct = None;
+        assert_accepted(&report);
+    }
+
+    #[test]
+    fn battery_out_of_range_or_not_finite_is_rejected() {
+        for pct in [-0.1, 100.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut report = valid_report();
+            report.battery_pct = Some(pct);
+            assert_rejected(&report, "battery_pct");
+        }
+    }
+
+    #[test]
+    fn old_reports_without_battery_still_parse() {
+        let json = r#"{"device_id":"my-pc","label":"a","hostname":"","ip":"","cpu_pct":0,"mem_used_mb":0,"mem_total_mb":0,"disk_used_gb":0,"disk_total_gb":0,"temp_c":0,"uptime_s":0}"#;
+        let report: Report = serde_json::from_str(json).unwrap();
+        assert_eq!(report.battery_pct, None);
+        assert_eq!(report.charging, None);
+    }
+
+    #[test]
+    fn battery_fields_parse_and_wrong_types_are_refused() {
+        let good = r#"{"device_id":"pi-zero","label":"Pi","hostname":"","ip":"","cpu_pct":0,"mem_used_mb":0,"mem_total_mb":0,"disk_used_gb":0,"disk_total_gb":0,"temp_c":0,"uptime_s":0,"battery_pct":87.5,"charging":true}"#;
+        let report: Report = serde_json::from_str(good).unwrap();
+        assert_eq!(report.battery_pct, Some(87.5));
+        assert_eq!(report.charging, Some(true));
+
+        let wrong = r#"{"device_id":"pi-zero","label":"Pi","hostname":"","ip":"","cpu_pct":0,"mem_used_mb":0,"mem_total_mb":0,"disk_used_gb":0,"disk_total_gb":0,"temp_c":0,"uptime_s":0,"battery_pct":"full","charging":"yes"}"#;
+        let parsed: Result<Report, serde_json::Error> = serde_json::from_str(wrong);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn device_status_carries_battery_and_local() {
+        let mut report = valid_report();
+        report.battery_pct = Some(45.0);
+        report.charging = Some(false);
+        let status = DeviceStatus {
+            report: report,
+            online: true,
+            local: true,
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["battery_pct"], serde_json::json!(45.0));
+        assert_eq!(json["charging"], serde_json::json!(false));
+        assert_eq!(json["local"], serde_json::json!(true));
+    }
+
     // ---- report packet and reply (T-033) ----
 
     // the smallest valid report, as the contract measures it, with the given id
@@ -1160,6 +1255,8 @@ mod tests {
             disk_total_gb: 0.0,
             temp_c: 0.0,
             uptime_s: 0.0,
+            battery_pct: None,
+            charging: None,
         }
     }
 
@@ -1722,5 +1819,68 @@ mod tests {
         let mut packet = valid_agent();
         packet.project = "K\u{fc}che \u{1F600}".to_string();
         assert_agent_accepted(&packet);
+    }
+
+    // ---- golden socket line, shared with the dashboard preview mock (T-061) ----
+
+    // the fixture the Python preview mock is checked against
+    const ENVELOPE_FIXTURE: &str = include_str!("../../pi/tests/fixtures/envelope_v1.json");
+
+    // a full envelope: one device, one session, every optional field set
+    fn fixture_envelope() -> Envelope {
+        let report = Report {
+            device_id: "pi-zero".to_string(),
+            label: "Pi".to_string(),
+            hostname: "pi-zero".to_string(),
+            ip: "192.168.1.50".to_string(),
+            cpu_pct: 12.5,
+            mem_used_mb: 210.0,
+            mem_total_mb: 416.0,
+            disk_used_gb: 4.5,
+            disk_total_gb: 29.0,
+            temp_c: 47.5,
+            uptime_s: 3600.0,
+            battery_pct: Some(87.0),
+            charging: Some(true),
+        };
+        let device = DeviceStatus {
+            report: report,
+            online: true,
+            local: true,
+        };
+        let session = AgentSession {
+            sid: "0123456789ab".to_string(),
+            device_id: "pi-zero".to_string(),
+            label: "Pi".to_string(),
+            project: "deskpane".to_string(),
+            state: AgentState::NeedsYou,
+            doing: "Bash".to_string(),
+            running_s: 600,
+            state_s: 30,
+            silent_s: 5,
+            quiet: false,
+            ctx: Some(42),
+        };
+        let views = Views {
+            stats: StatsView {
+                devices: vec![device],
+            },
+            agents: AgentsView {
+                sessions: vec![session],
+            },
+        };
+        Envelope {
+            v: ENVELOPE_VERSION,
+            views: views,
+        }
+    }
+
+    #[test]
+    fn envelope_fixture_matches_file() {
+        // the daemon's real serialization, read back as a JSON value
+        let serialized = serde_json::to_value(fixture_envelope()).unwrap();
+        // the file the preview mock is tested against
+        let expected: serde_json::Value = serde_json::from_str(ENVELOPE_FIXTURE).unwrap();
+        assert_eq!(serialized, expected);
     }
 }

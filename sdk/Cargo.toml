@@ -1,0 +1,21 @@
+[package]
+name = "deskpane-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# the plugin SDK: the wire contract (re-exported) plus a small UDP send helper,
+# so a data-source plugin depends on one crate and sends validated packets the
+# same way the reference reporter does. The library name is deskpane_sdk.
+[lib]
+name = "deskpane_sdk"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+deskpane-contract = { path = "../contract" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
