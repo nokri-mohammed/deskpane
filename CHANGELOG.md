@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.0-beta.5](https://github.com/nokri-mohammed/deskpane/compare/v0.1.0-beta.4...v0.1.0-beta.5) (2026-11-11)
+
+
+### Features
+
+* **install:** --power-save to turn off unused hardware ([81286fe](https://github.com/nokri-mohammed/deskpane/commit/81286fe895081e5db09706c6f8fa8cb72fc98178))
+* plugin SDK, contract crate and panel registry ([81286fe](https://github.com/nokri-mohammed/deskpane/commit/81286fe895081e5db09706c6f8fa8cb72fc98178))
+* **preview:** run the dashboard on a PC against mock or real data ([81286fe](https://github.com/nokri-mohammed/deskpane/commit/81286fe895081e5db09706c6f8fa8cb72fc98178))
+* **reporter:** optional PiSugar battery reading ([81286fe](https://github.com/nokri-mohammed/deskpane/commit/81286fe895081e5db09706c6f8fa8cb72fc98178))
+
+
+### Bug Fixes
+
+* **bundle:** ship deskpane_contract.py in the Pi bundle ([81286fe](https://github.com/nokri-mohammed/deskpane/commit/81286fe895081e5db09706c6f8fa8cb72fc98178))
+
 ## [0.1.0-beta.4](https://github.com/nokri-mohammed/deskpane/compare/v0.1.0-beta.3...v0.1.0-beta.4) (2026-11-08)
 
 
