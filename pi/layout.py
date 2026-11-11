@@ -492,6 +492,31 @@ def fallback_key(page_key, keys):
     return ("overview", None)
 
 
+def online_ids(devices):
+    """The device ids that are online in one socket line."""
+    ids = set()
+    for device in devices:
+        if device.get("online") is True:
+            ids.add(device.get("device_id"))
+    return ids
+
+
+def gone_offline(prev_online, devices):
+    """The device ids that were online on the previous line and are offline
+    now. prev_online is None on the first line after start, which reports
+    nothing. A device that was already offline, or arrives offline, is not
+    reported: opening its page was a choice. A device the daemon forgot is
+    gone from the ring, and fallback_key handles that."""
+    if prev_online is None:
+        return set()
+    ids = set()
+    for device in devices:
+        device_id = device.get("device_id")
+        if device_id in prev_online and device.get("online") is not True:
+            ids.add(device_id)
+    return ids
+
+
 def focus_state(page_key):
     """The starting state for step_focus: on page_key, no focus jump."""
     return {"page_key": page_key, "focus_until": 0.0, "focus_return": None}
@@ -502,11 +527,13 @@ def step_focus(state, event, now):
     {"page_key", "focus_until", "focus_return"}; the input is not changed.
 
     Events:
-      {"kind": "line", "prev_states", "new_states", "last_tap", "blocked"}
+      {"kind": "line", "prev_states", "new_states", "last_tap", "blocked", "went_offline"}
           a new socket line; a new needs_you (should_focus_agents) jumps to
           the first agents page for FOCUS_FOR_S. A second jump during a
           focus keeps the page to return to. blocked: the network-problem
-          screen is up, so never jump.
+          screen is up, so never jump. went_offline (gone_offline): when the
+          device page on screen, or the page a focus returns to, is in it,
+          that page becomes the overview.
       {"kind": "tick", "keys"}
           every frame, with the current page keys: an expired focus returns
           to the saved page, and a page that has gone falls back.
@@ -519,6 +546,13 @@ def step_focus(state, event, now):
     kind = event.get("kind")
 
     if kind == "line":
+        # the device on screen (or the page a focus returns to) just went
+        # offline: go home instead of showing "<label>: offline"
+        went_offline = event.get("went_offline") or set()
+        if page_key[0] == "device" and page_key[1] in went_offline:
+            page_key = ("overview", None)
+        if focus_return is not None and focus_return[0] == "device" and focus_return[1] in went_offline:
+            focus_return = ("overview", None)
         jump = not event.get("blocked") and should_focus_agents(
             event.get("prev_states"), event.get("new_states") or {}, event.get("last_tap"), now)
         if jump:

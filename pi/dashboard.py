@@ -39,8 +39,10 @@ from layout import (
     fit_text,
     fmt_elapsed,
     focus_state,
+    gone_offline,
     host_max_w,
     local_battery,
+    online_ids,
     overview_layout,
     page_keys,
     page_ring,
@@ -1182,6 +1184,8 @@ def main(screen=None):
     sorted_sessions = []
     last_line_no = 0
     prev_states = None
+    # device ids online on the last line, to spot a device that just went offline
+    prev_online = None
     # current page key and the focus jump (layout.step_focus decides)
     focus = focus_state(("overview", None))
     transition_until = 0.0
@@ -1223,16 +1227,20 @@ def main(screen=None):
             devices = sorted(reader.devices, key=lambda d: d.get("device_id", ""))
 
             # a new socket line: re-sort sessions, track new and leaving ones,
-            # and jump to the agents page when one newly needs you
+            # jump to the agents page when one newly needs you, and leave a
+            # device page whose device just went offline
             line_no = reader.line_no
             if line_no != last_line_no:
                 last_line_no = line_no
                 sorted_sessions = sort_agents(reader.sessions)
                 scene.update(sorted_sessions, now)
                 new_states = {s.get("sid"): s.get("state") for s in sorted_sessions}
+                went_offline = gone_offline(prev_online, devices)
                 focus = step_focus(focus, {"kind": "line", "prev_states": prev_states, "new_states": new_states,
-                                           "last_tap": last_tap_at, "blocked": showing_problem}, now)
+                                           "last_tap": last_tap_at, "blocked": showing_problem,
+                                           "went_offline": went_offline}, now)
                 prev_states = new_states
+                prev_online = online_ids(devices)
 
             # the page ring: overview, agents pages, devices, plugin pages
             agent_rows_all = scene.rows(sorted_sessions, now)

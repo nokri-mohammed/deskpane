@@ -106,7 +106,10 @@ pi/
                       battery_style (red under 20), battery_geometry, bolt_points,
                       battery_widget_layout, host_max_w; agents page: sort_agents, agent_style, page_ring,
                       agent_rows_layout, fmt_elapsed, agent_summary, fit_text,
-                      should_focus_agents, parse_socket_line (envelope or legacy array)
+                      should_focus_agents, parse_socket_line (envelope or legacy array);
+                      focus: page_keys, fallback_key, step_focus (pure state machine),
+                      online_ids + gone_offline (a device page whose device just went
+                      offline returns to the overview)
   charpack.py         pure character pack helpers: pack format v1, frame_rect, looks,
                       assign_looks, character_pose, anim_frame, best_scale, track_sessions,
                       plan_pack_install, check_pack_file
