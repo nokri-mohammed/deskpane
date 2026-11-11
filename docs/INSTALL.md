@@ -59,11 +59,12 @@ In this guide:
 4. [Check that it works](#check-that-it-works)
 5. [Send stats from your other computers](#send-stats-from-your-other-computers)
 6. [Show your AI agents on the screen](#show-your-ai-agents-on-the-screen)
-7. [Change the settings](#change-the-settings)
-8. [Upgrade](#upgrade)
-9. [Roll back to the previous version](#roll-back-to-the-previous-version)
-10. [Uninstall](#uninstall)
-11. [Troubleshooting](#troubleshooting)
+7. [PiSugar battery (optional)](#pisugar-battery-optional)
+8. [Change the settings](#change-the-settings)
+9. [Upgrade](#upgrade)
+10. [Roll back to the previous version](#roll-back-to-the-previous-version)
+11. [Uninstall](#uninstall)
+12. [Troubleshooting](#troubleshooting)
 
 ## What you need
 
@@ -481,7 +482,7 @@ A reporter that runs as a Windows service is planned for a later version.
 
 ## Show your AI agents on the screen
 
-From 0.2.0-beta.1 the screen can show your Claude Code sessions: one row for each session, with
+From 0.1.0-beta.4 the screen can show your Claude Code sessions: one row for each session, with
 the project name, what it does and a big amber "NEEDS YOU" when it waits for you. Each session
 sends a small status packet from a Claude Code hook. The packet holds the project folder name
 (not the path), a tool name and a state word. It never holds your prompts, files or commands.
@@ -595,6 +596,114 @@ installed pack stays as it was). The pack goes to
 - `sudo ./uninstall.sh` keeps it; `sudo ./uninstall.sh --purge` removes it.
 - `--characters` cannot be used with `--reporter-only` or `--no-display`.
 
+## PiSugar battery (optional)
+
+> **Pending the security setup.** This route is under review by the security specialist and
+> has not been run on a real Pi yet. The steps were checked against the files inside the
+> 2.4.1 package, not on a Pi. Follow it only once that review and a real Pi check are done.
+
+> **PiSugar S is not supported.** The S series has no fuel gauge and no I2C data link, so
+> pisugar-server cannot read it, and it uses the I2C clock pin (GPIO3) for auto power-on, so
+> leave I2C off on a Pi with a PiSugar S. Only the PiSugar 2 and 3 families report a level.
+
+With a PiSugar board on the Pi, the screen can show its charge: a small battery icon with the
+percent at the top right of the overview and on the Pi's own page, red under 20 %, with a
+lightning mark while on external power. Without a PiSugar nothing is drawn.
+
+deskpane does not ship or install PiSugar's software. It reads `pisugar-server`, PiSugar's own
+service, through its Unix socket only. Read PiSugar's own guide first:
+[PiSugar Power Manager](https://docs.pisugar.com/docs/product-wiki/battery/pisugar-power-manager).
+
+`pisugar-server` opens a web UI, a WebSocket and a TCP port on the LAN by default, with no auth
+on the socket and TCP commands that can change the board. The steps below turn all network
+ports off and keep only a Unix socket that group `pisugar` can use. Do not use PiSugar's
+one-line installer (piping a script into `bash`); use the pinned package below.
+
+1. Find your board model. Enable I2C (`sudo raspi-config`, Interface Options, I2C), then:
+
+   ```bash
+   sudo apt-get install -y i2c-tools
+   sudo i2cdetect -y 1
+   ```
+
+   Address `57` means a **PiSugar 3**. Addresses `32` and `75` mean a board of the
+   **PiSugar 2** family; its label says which one. pisugar-server takes the model only as
+   one of these exact names, spaces and brackets included:
+
+   | Board | Model name |
+   |---|---|
+   | PiSugar 3 | `PiSugar 3` |
+   | PiSugar 2 with 4 LEDs | `PiSugar 2 (4-LEDs)` |
+   | PiSugar 2 with 2 LEDs | `PiSugar 2 (2-LEDs)` |
+   | PiSugar 2 Pro | `PiSugar 2 Pro` |
+
+   Use your board's name everywhere the steps below say `PiSugar 3`.
+
+2. Download the pinned package and check its SHA-256 (it must print `OK`):
+
+   ```bash
+   cd /tmp
+   curl -fLO https://github.com/PiSugar/pisugar-power-manager-rs/releases/download/v2.4.1/pisugar-server_2.4.1-1_arm64.deb
+   echo "9d5e70a7f3f541c01cafce8948571c0a7b1c24f86c3c5a2043c50ca2bd76d4a3  pisugar-server_2.4.1-1_arm64.deb" | sha256sum -c
+   ```
+
+3. Answer the package's questions before installing it: web UI off, TCP off, Unix socket on,
+   listening on loopback only:
+
+   ```bash
+   sudo debconf-set-selections <<'EOF'
+   pisugar-server pisugar-server/model select PiSugar 3
+   pisugar-server pisugar-server/address select 127.0.0.1
+   pisugar-server pisugar-server/web boolean false
+   pisugar-server pisugar-server/tcp boolean false
+   pisugar-server pisugar-server/uds boolean true
+   EOF
+   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ./pisugar-server_2.4.1-1_arm64.deb
+   ```
+
+   The package also installs `jq`, turns I2C on with `raspi-config` and writes
+   `/etc/default/pisugar-server`. The next step replaces its start command, so that file is
+   not used. On a first install the package does not enable or start the service.
+
+4. Move the socket to `/run/pisugar`, group `pisugar`, mode 0660, with a systemd drop-in.
+   deskpane's `install.sh` creates the system group `pisugar` when it is missing; on a Pi
+   without deskpane yet, create it first with `sudo groupadd --system pisugar`.
+
+   ```bash
+   sudo mkdir -p /etc/systemd/system/pisugar-server.service.d
+   sudo tee /etc/systemd/system/pisugar-server.service.d/deskpane.conf >/dev/null <<'EOF'
+   [Service]
+   Group=pisugar
+   RuntimeDirectory=pisugar
+   RuntimeDirectoryMode=0750
+   ExecStart=
+   ExecStart=/usr/bin/pisugar-server --model "PiSugar 3" --syslog --config /etc/pisugar-server/config.json --uds /run/pisugar/pisugar-server.sock --uds-mode 660
+   EOF
+   sudo systemctl daemon-reload
+   sudo systemctl enable pisugar-server
+   sudo systemctl restart pisugar-server
+   ```
+
+   Keep `--uds-mode 660`: without it pisugar-server makes the socket `666`, so every user
+   on the Pi could send it commands. `/run/pisugar` is removed when the service stops, so
+   no old socket file blocks the next start.
+
+5. Check that no port is open and the socket answers (the first command must print nothing):
+
+   ```bash
+   sudo ss -ltnup | grep -i pisugar
+   ls -l /run/pisugar/pisugar-server.sock
+   echo "get battery" | sudo nc -q 1 -U /run/pisugar/pisugar-server.sock
+   ```
+
+   The socket shows `srw-rw---- root pisugar`, and the last command prints `battery: ...`.
+
+6. Turn the battery on in deskpane: set `BATTERY=pisugar` in `/etc/deskpane/env` (see
+   [Change the settings](#change-the-settings)), then
+   `sudo systemctl restart deskpane-reporter`. The reporter's log (`journalctl -u
+   deskpane-reporter`) says `battery: reading pisugar-server at /run/pisugar/pisugar-server.sock`
+   once, or `no answer` when the socket cannot be read.
+
 ## Change the settings
 
 The settings are in `/etc/deskpane/env` on the Pi. An upgrade never changes this
@@ -605,6 +714,8 @@ file.
 | `DEVICE_ID` | The id of the Pi's own entry. Empty means automatic. | empty (automatic, `pi-zero` on Pis installed before 0.1.0-beta.3) |
 | `LABEL` | The name shown for the Pi. Empty means the hostname. | empty (hostname) |
 | `LISTEN_ADDR` | The address and port where the daemon receives reports. | `0.0.0.0:8765` |
+| `BATTERY` | `pisugar` shows a PiSugar battery ([PiSugar battery](#pisugar-battery-optional)); `none` or empty shows none. | `none` |
+| `PISUGAR_SOCKET` | Where `pisugar-server`'s socket is, for `BATTERY=pisugar`. | `/run/pisugar/pisugar-server.sock` |
 
 1. Open the file:
 
@@ -709,6 +820,9 @@ the folder, download and extract the bundle again.
 
    This also removes `/etc/deskpane`, the `deskpane` user and the display driver
    file. It removes the installer's lines from `config.txt` and `cmdline.txt`.
+   It keeps the `pisugar` group, because `pisugar-server` uses it (see
+   [PiSugar battery](#pisugar-battery-optional)). Without a PiSugar you can remove it with
+   `sudo groupdel pisugar`.
 
 4. Restart the Pi if the uninstaller tells you to:
 

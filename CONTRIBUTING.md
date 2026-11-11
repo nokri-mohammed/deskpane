@@ -11,9 +11,9 @@ For a security problem, do not open an issue. See [SECURITY.md](SECURITY.md).
 |---|---|
 | `daemon/` | Rust. Runs on the Pi. Receives the reports and agent status packets over UDP and serves them to the dashboard. Also a library with the shared report type. |
 | `reporter/` | Rust. Runs on each computer. Reads the system stats and sends them to the daemon. `deskpane agent` is the Claude Code hook client. |
-| `pi/` | Python (pygame). Draws the dashboard on the touchscreen, including the agents page and the optional character packs (`charpack.py`, `charpack_install.py`, `sprites.py`). |
+| `pi/` | Python (pygame). Draws the dashboard on the touchscreen, including the agents page and the optional character packs (`charpack.py`, `charpack_install.py`, `sprites.py`). `display.py` switches between the panel, a desktop window and PNG frames; `preview.py`, `mock_daemon.py` and `preview_scenarios.py` are the local preview and never ship to the Pi. |
 | `deploy/` | The Pi installer, the uninstaller and the systemd units. |
-| `scripts/` | Scripts that build the Pi bundle and install it on a Pi over SSH. |
+| `scripts/` | Scripts that build the Pi bundle, install it on a Pi over SSH, and preview the dashboard on your computer (`preview.sh`). |
 | `docs/` | The guides (`INSTALL.md`, `HARDWARE.md`, `RECOVERY.md`, `CHARACTERS.md`), the JSON contract (`CONTRACT.md`), the ideas (`IDEAS.md`), the plans, `diagram/` (architecture diagram source and rendered PNGs) and `media/` (photos of the screen). |
 
 `daemon/` and `reporter/` are one Cargo workspace: one `Cargo.toml` at the repository root and
@@ -33,6 +33,9 @@ reporter (each device) --UDP JSON--> daemon (Pi) --Unix socket, one JSON line/se
   temperature, hostname and uptime with the [`sysinfo`](https://docs.rs/sysinfo) crate and
   sends one report over UDP every few seconds (default 4). The same binary builds for Linux
   and Windows. A systemd unit (Linux) and a Windows Service are planned as `deskpane install`.
+  On a Pi with a PiSugar board, `--battery pisugar` adds the charge and the plug state, read
+  from `pisugar-server`'s Unix socket with three fixed `get` lines only
+  (`reporter/src/services/pisugar.rs`, Linux only).
 - **The daemon on the Pi** receives the reports, checks each one (`validate`), keeps the
   latest report per device in memory and marks a device offline after 15 seconds of silence.
   The `PROTOCOL` setting is the single switch point for adding TCP and then TCP with mutual
@@ -51,7 +54,9 @@ reporter (each device) --UDP JSON--> daemon (Pi) --Unix socket, one JSON line/se
   X11, because the SPI panel is not a DRM display): an overview page, an agents page when a
   session exists, then one page per device
   with ring gauges for CPU and memory, a bar for disk, temperature, label, hostname, IP
-  address, uptime and online or offline. A background thread reads the touchscreen's raw evdev
+  address, uptime and online or offline. When the Pi's own report has a battery reading
+  (`local: true` in the socket line), a small battery icon shows at the top right of the
+  overview and next to the clock on that device's page. A background thread reads the touchscreen's raw evdev
   events and moves to the next page on a tap. A drawing error shows an error screen for that
   page instead of stopping the display.
 
@@ -128,6 +133,36 @@ cargo run -p reporter -- report --daemon 127.0.0.1:8765 --device-id dev --label 
 The daemon reads three environment variables: `LISTEN_ADDR` (default `0.0.0.0:8765`),
 `SOCKET_PATH` (default `/run/deskpane/daemon.sock`, which only exists on an installed Pi, so set
 it to a path in `/tmp` on your own computer) and `PROTOCOL` (only `udp` works).
+
+### Preview the dashboard on your computer
+
+`scripts/preview.sh` runs the real `pi/dashboard.py` on a Linux computer (WSL2 with WSLg works),
+so you can see a screen change before it goes to the Pi. The first run creates `.venv-preview/`
+(git-ignored) with pygame 2.6.1; it needs Python 3.11 or newer with `venv`.
+
+```bash
+scripts/preview.sh                                # a window, mock scenario busy, scale 2
+scripts/preview.sh --scenario worst --scale 3     # busy (alias normal), single, needs-you, worst, offline, battery, empty
+scripts/preview.sh --headless --serve 8780        # no window; live frames at http://localhost:8780
+scripts/preview.sh --headless --frames 20 --tap-every 3   # 20 PNGs in ~/.cache/deskpane-preview/, then exit
+scripts/preview.sh --real                         # the real daemon, a reporter and agent test on 127.0.0.1:18765
+scripts/preview.sh --help                         # every option
+```
+
+- The data comes from a mock daemon (`pi/mock_daemon.py`) that writes one scenario line a
+  second from `pi/preview_scenarios.py`, the same envelope the daemon sends. A daemon test checks
+  the envelope against `pi/tests/fixtures/envelope_v1.json`, and a Python test checks every
+  scenario line has its keys, so the mock cannot drift from the real shape.
+- The dashboard picks its display from `DESKPANE_DISPLAY` (`fb`, the default on the Pi;
+  `window`; `png`). In the window, a click, Space or Right arrow is a tap, N toggles the network
+  problem screen, S saves a PNG and Q or Esc quits. `NET_IFACE=none` turns off the Wi-Fi check.
+- The frame server listens on 127.0.0.1 only and serves just the page and `latest.png`.
+- A character pack is used only where it is already installed (`/var/lib/deskpane/characters`,
+  or a folder under the git-ignored `assets/characters/`), read in place and never copied.
+  `--no-pack` forces the built-in icons. Frames can show pack art, so they stay in
+  `~/.cache/deskpane-preview/`, outside the repository.
+- pygame 2.6.1 here and 2.1 on the Pi can differ by a pixel in text; the real panel stays the
+  final check.
 
 ## Commit messages and versions
 
@@ -301,7 +336,9 @@ Working today:
 - The daemon: UDP listener, report checks, in-memory device table (at most 32 devices, offline
   after 15 seconds, forgotten after 5 minutes of silence) and the Unix socket broadcaster.
 - The reporter: `deskpane report --daemon <addr> --device-id <id> --label <name>
-  [--interval <secs>]`, tested end to end against the daemon with real stats.
+  [--interval <secs>] [--battery none|pisugar]`, tested end to end against the daemon with
+  real stats. The PiSugar battery was checked against a fake socket on loopback; the
+  `pisugar-server` setup on the real Pi waits for the security review.
 - The dashboard: framebuffer drawing (`pi/fb_display.py`), touch (`pi/touch.py`), start on
   boot. Its end-to-end test (reporter, daemon, socket, rendered pixels) used a scratch file in
   place of `/dev/fb1`.
