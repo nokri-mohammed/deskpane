@@ -1,5 +1,6 @@
 pub mod agent_table;
 pub mod device_table;
+pub mod metric_table;
 pub mod services;
 
 // the wire contract now lives in its own crate (deskpane-contract) so the
