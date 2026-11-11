@@ -165,6 +165,34 @@ class InstallCharactersTest(ShellTestCase):
         for name in ("charpack.py", "charpack_install.py", "sprites.py", "display.py", "deskpane_contract.py"):
             self.assertTrue(os.path.isfile(os.path.join(self.root, "opt/deskpane/current/dashboard", name)))
 
+    def _config_txt(self):
+        with open(os.path.join(self.root, "boot/firmware/config.txt")) as f:
+            return f.read()
+
+    def test_power_save_adds_a_reversible_config_block(self):
+        result = self.install("--power-save")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = self._config_txt()
+        self.assertIn("# >>> deskpane power-save", config)
+        self.assertIn("# <<< deskpane power-save", config)
+        self.assertIn("dtoverlay=disable-bt", config)
+        self.assertIn("dtparam=audio=off", config)
+        self.assertIn("dtparam=act_led_trigger=none", config)
+        # uninstall --purge removes the block and leaves no power-save lines
+        uninstall = os.path.join(self.root, "opt/deskpane/current/uninstall.sh")
+        if os.path.isfile(uninstall):
+            self.run_script(uninstall, "--purge")
+            after = self._config_txt()
+            self.assertNotIn("deskpane power-save", after)
+            self.assertNotIn("dtoverlay=disable-bt", after)
+
+    def test_default_install_has_no_power_save_block(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = self._config_txt()
+        self.assertNotIn("power-save", config)
+        self.assertNotIn("disable-bt", config)
+
     def test_good_zip_fills_the_folder_root_owned_0644(self):
         result = self.install("--characters", self.good_zip())
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -704,6 +704,45 @@ one-line installer (piping a script into `bash`); use the pinned package below.
    deskpane-reporter`) says `battery: reading pisugar-server at /run/pisugar/pisugar-server.sock`
    once, or `no answer` when the socket cannot be read.
 
+## Saving battery
+
+If you run the Pi on a battery (a PiSugar or similar), a few things stretch the runtime.
+
+**The honest part first.** On the Elegoo 3.5" screen the backlight is wired permanently on and
+the `fb_ili9486` driver gives no software control of it (`/sys/class/backlight/` is empty), so the
+single biggest consumer cannot be dimmed or switched off in software. Making the backlight
+switchable needs a small hardware change (driving it from a GPIO through a MOSFET), which is part
+of the carrier-board plan. Everything below reduces the Pi's own draw, which helps but is modest
+next to the backlight.
+
+**The easy, reversible option.** Install (or re-run the installer) with `--power-save`:
+
+```bash
+sudo ./install.sh --power-save
+```
+
+It adds a clearly marked block to `/boot/firmware/config.txt` that turns off hardware the dashboard
+never uses: the onboard audio, Bluetooth, and the green activity LED. It needs a reboot, and
+`sudo ./uninstall.sh --purge` removes the block again.
+
+**Extra tweaks you can apply by hand** (not automated, because they carry more risk or depend on
+your setup):
+
+- **CPU governor.** Use the on-demand governor so the cores clock down when idle:
+  `echo ondemand | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`. Make it stick
+  across reboots with a small `cpufrequtils` config or a one-line systemd service.
+- **WiFi power saving.** `sudo iw dev wlan0 set power_save on`. Reports may arrive a touch later,
+  but the radio sleeps between them.
+- **Lighter graphics.** `config.txt` ships `dtoverlay=vc4-kms-v3d`, the full GPU stack, even though
+  the dashboard draws to the small SPI framebuffer. Switching it to `vc4-fkms-v3d` (or removing it)
+  can save a little on a Pi Zero 2 W. Test it carefully: a wrong change here can leave a blank
+  screen, and the dashboard finds its panel by driver name so the framebuffer number does not
+  matter.
+
+**Measuring is hard** on a basic PiSugar with no fuel gauge: there is no reliable battery reading to
+compare before and after. A PiSugar 3 (which deskpane can read, see
+[PiSugar battery](#pisugar-battery-optional)) would let you see the effect.
+
 ## Change the settings
 
 The settings are in `/etc/deskpane/env` on the Pi. An upgrade never changes this

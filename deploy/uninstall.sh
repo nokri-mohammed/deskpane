@@ -82,6 +82,15 @@ if [[ -f "$CONFIG_TXT" ]] && grep -q '^dtoverlay=tft35a' "$CONFIG_TXT"; then
   sync
   REBOOT_NEEDED=1
 fi
+# the power-save block (install.sh --power-save), its own marker
+if [[ -f "$CONFIG_TXT" ]] && grep -qF '# >>> deskpane power-save' "$CONFIG_TXT"; then
+  say "removing the power-save block from config.txt"
+  sed -e '/^# >>> deskpane power-save$/,/^# <<< deskpane power-save$/d' "$CONFIG_TXT" >"$CONFIG_TXT.new"
+  mv -f "$CONFIG_TXT.new" "$CONFIG_TXT"
+  sync
+  REBOOT_NEEDED=1
+fi
+
 CMDLINE_TXT="$DESTDIR$BOOT_DIR/cmdline.txt"
 if [[ -f "$CMDLINE_TXT" ]] && grep -qw 'fbcon=map:1' "$CMDLINE_TXT"; then
   say "removing fbcon=map:1 from cmdline.txt"

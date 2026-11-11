@@ -42,6 +42,9 @@ Usage: sudo ./install.sh [options]
 
   --no-display         headless: no touchscreen overlay, boot config or dashboard
   --no-reporter        do not report the Pi's own stats
+  --power-save         turn off hardware the dashboard does not use (onboard
+                       audio, Bluetooth, the green activity LED) to save battery;
+                       reversible, removed by uninstall.sh. Needs a reboot.
   --device-id ID       device id for the Pi's own reporter (first install only),
                        letters, digits, dot, dash, underscore, up to 64
                        (default: automatic, derived from /etc/machine-id)
@@ -140,6 +143,7 @@ OLD_REMOVED=0
 OLD_DIRS=()
 WITH_DISPLAY=1
 WITH_REPORTER=1
+WITH_POWER_SAVE=0
 DEVICE_ID=""
 LABEL=""
 OVERLAY_FILE=""
@@ -149,6 +153,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-display) WITH_DISPLAY=0 ;;
     --no-reporter) WITH_REPORTER=0 ;;
+    --power-save) WITH_POWER_SAVE=1 ;;
     --device-id)
       [[ $# -ge 2 ]] || die "--device-id needs a value"
       DEVICE_ID="$2"
@@ -417,6 +422,42 @@ if [[ "$WITH_DISPLAY" -eq 1 ]]; then
     CMDLINE="$(head -n 1 "$CMDLINE_TXT" | sed 's/[[:space:]]*$//')"
     printf '%s fbcon=map:1\n' "$CMDLINE" >"$CMDLINE_TXT.new"
     mv -f "$CMDLINE_TXT.new" "$CMDLINE_TXT"
+    sync
+    REBOOT_NEEDED=1
+  fi
+fi
+
+# --power-save: turn off hardware the dashboard never uses, to stretch the
+# battery. Independent of the display, its own marked block so uninstall.sh can
+# remove it cleanly. Note: on this screen (fb_ili9486) the backlight is wired on
+# and cannot be controlled in software, so this is modest; the big saving needs
+# a backlight-on-GPIO modification (see the carrier board plan, T-066).
+PS_MARK_BEGIN="# >>> deskpane power-save"
+PS_MARK_END="# <<< deskpane power-save"
+if [[ "$WITH_POWER_SAVE" -eq 1 ]]; then
+  CONFIG_TXT="$DESTDIR$BOOT_DIR/config.txt"
+  if [[ ! -f "$CONFIG_TXT" ]]; then
+    say "no $CONFIG_TXT, skipping --power-save"
+  elif grep -qF "$PS_MARK_BEGIN" "$CONFIG_TXT"; then
+    say "config.txt already has the power-save block"
+  else
+    say "adding the power-save block to config.txt (audio, Bluetooth, activity LED off)"
+    backup_once "$CONFIG_TXT"
+    {
+      echo ""
+      echo "$PS_MARK_BEGIN"
+      # apply to every board revision
+      echo "[all]"
+      echo "# deskpane power saving (reversible via uninstall.sh): turn off"
+      echo "# hardware the dashboard does not use. A later dtparam wins, so"
+      echo "# audio=off here overrides an earlier audio=on."
+      echo "dtparam=audio=off"
+      echo "dtoverlay=disable-bt"
+      echo "# the green activity LED"
+      echo "dtparam=act_led_trigger=none"
+      echo "dtparam=act_led_activelow=off"
+      echo "$PS_MARK_END"
+    } >>"$CONFIG_TXT"
     sync
     REBOOT_NEEDED=1
   fi

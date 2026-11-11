@@ -78,6 +78,35 @@ BQ24074RGTR and the USB-C receptacle C2765186 as **Extended** (checked 2026-11-1
 part adds a feeder loading fee of $3.07. That is accepted: there is no Basic part with power path
 or a fuel gauge. Passives (resistors, MLCCs) should all come from the Basic library.
 
+### Backlight control (the real battery lever)
+
+Measured on the running unit, the display backlight is the single biggest power draw, and on the
+plug-in HAT it is wired permanently on: `/sys/class/backlight/` is empty, the `fb_ili9486` overlay
+exposes no backlight GPIO, so software cannot dim or switch it. That caps how far the OS power
+tweaks (T-068: audio, Bluetooth and activity LED off) can go.
+
+Making the backlight switchable is a hardware change, and where it goes depends on the display
+choice above:
+
+- **Bare panel (revision 2), the clean path.** The carrier drives the panel's backlight itself, so
+  it adds a small high-side load switch (a P-channel MOSFET, or a dedicated LED-backlight driver if
+  the panel wants a constant current) on the backlight supply, gated by a **spare GPIO reserved for
+  backlight enable** (BCM 12 or 13 are free and are hardware-PWM capable, so later dimming, not just
+  on/off, is possible). The dashboard then runs the idle feature: dim or switch the backlight off
+  after no touch for a timeout, wake on the next tap (the XPT2046 touch chip stays powered, so a tap
+  still registers). This is the big saving and it should be a hard requirement of the bare-panel
+  revision.
+- **Plug-in HAT (unit 1), only with a HAT modification.** The HAT's backlight LED and its feed sit
+  on the HAT, powered from the header rails, so the carrier cannot isolate it without cutting a
+  trace on the HAT and running the backlight anode through a MOSFET the carrier switches. That is a
+  one-off mod, acceptable for a single test unit but not the production path.
+
+Recommendation: reserve BCM 12 (hardware-PWM) for backlight enable on the carrier now, wire it to a
+load-switch footprint that is only populated when a bare panel is fitted, and treat software
+backlight control as a revision-2 feature. Unit 1 keeps the always-on HAT backlight unless the CEO
+wants the one-off HAT mod. Fold the dashboard idle-off feature (T-068's natural sequel) in once the
+backlight is switchable.
+
 ## 3. BOM
 
 Prices are LCSC unit prices at the lowest quantity, from search snapshots of the LCSC or JLCPCB
