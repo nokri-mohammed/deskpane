@@ -482,10 +482,45 @@ class StepFocusTest(unittest.TestCase):
     def start(self, page_key=("device", "dp-a")):
         return layout.focus_state(page_key)
 
-    def line(self, state, prev, new, now, last_tap=None, blocked=False):
+    def line(self, state, prev, new, now, last_tap=None, blocked=False, went_offline=None):
         event = {"kind": "line", "prev_states": prev, "new_states": new,
                  "last_tap": last_tap, "blocked": blocked}
+        if went_offline is not None:
+            event["went_offline"] = went_offline
         return layout.step_focus(state, event, now)
+
+    def test_current_device_going_offline_goes_to_the_overview(self):
+        state = self.line(self.start(("device", "dp-a")), {}, {}, 100, went_offline={"dp-a"})
+        self.assertEqual(state["page_key"], ("overview", None))
+
+    def test_another_device_going_offline_keeps_the_page(self):
+        state = self.line(self.start(("device", "dp-a")), {}, {}, 100, went_offline={"dp-b"})
+        self.assertEqual(state["page_key"], ("device", "dp-a"))
+
+    def test_device_going_offline_does_not_move_other_pages(self):
+        for page_key in (("overview", None), ("agents", 0)):
+            state = self.line(self.start(page_key), {}, {}, 100, went_offline={"dp-a"})
+            self.assertEqual(state["page_key"], page_key)
+
+    def test_offline_return_page_returns_to_the_overview(self):
+        # an agent focus jump from dp-a, then dp-a goes offline during the focus
+        state = self.line(self.start(("device", "dp-a")), {"a": "working"}, {"a": "needs_you"}, 100)
+        state = self.line(state, {"a": "needs_you"}, {"a": "needs_you"}, 101, went_offline={"dp-a"})
+        self.assertEqual(state["page_key"], ("agents", 0))
+        self.assertEqual(state["focus_return"], ("overview", None))
+        state = self.tick(state, 100 + layout.FOCUS_FOR_S)
+        self.assertEqual(state["page_key"], ("overview", None))
+
+    def test_needs_you_and_offline_in_one_line_still_jumps_to_agents(self):
+        state = self.line(self.start(("device", "dp-a")), {"a": "working"}, {"a": "needs_you"}, 100,
+                          went_offline={"dp-a"})
+        self.assertEqual(state["page_key"], ("agents", 0))
+        self.assertEqual(state["focus_return"], ("overview", None))
+
+    def test_line_without_went_offline_is_unchanged(self):
+        state = self.line(self.start(("device", "dp-a")), {}, {}, 100)
+        self.assertEqual(state["page_key"], ("device", "dp-a"))
+
 
     def tick(self, state, now, keys=None):
         return layout.step_focus(state, {"kind": "tick", "keys": keys or self.KEYS}, now)
@@ -766,6 +801,35 @@ class BatteryGeometryTest(unittest.TestCase):
         clock_y = layout.overview_layout(WIDTH, HEIGHT, CLOCK_H, DATE_H, SUMMARY_H, agents_h=11)["clock_y"]
         self.assertLess(layout.BATTERY_MARGIN + 11, clock_y)
         self.assertGreater(place["left"], WIDTH // 2)
+
+
+class GoneOfflineTest(unittest.TestCase):
+    """online_ids and gone_offline: which devices just went from online to offline."""
+
+    def dev(self, device_id, online):
+        return {"device_id": device_id, "online": online}
+
+    def test_online_ids_lists_only_online_devices(self):
+        devices = [self.dev("dp-a", True), self.dev("dp-b", False), {"device_id": "dp-c"}]
+        self.assertEqual(layout.online_ids(devices), {"dp-a"})
+
+    def test_first_line_never_reports_anything(self):
+        self.assertEqual(layout.gone_offline(None, [self.dev("dp-a", False)]), set())
+
+    def test_online_to_offline_is_reported(self):
+        self.assertEqual(layout.gone_offline({"dp-a", "dp-b"}, [self.dev("dp-a", False), self.dev("dp-b", True)]),
+                         {"dp-a"})
+
+    def test_already_offline_device_is_not_reported(self):
+        # viewing a device that was offline before is a deliberate choice: no jump
+        self.assertEqual(layout.gone_offline(set(), [self.dev("dp-a", False)]), set())
+
+    def test_new_device_arriving_offline_is_not_reported(self):
+        self.assertEqual(layout.gone_offline({"dp-a"}, [self.dev("dp-a", True), self.dev("dp-new", False)]), set())
+
+    def test_forgotten_device_is_not_reported(self):
+        # a device the daemon dropped is gone from the ring; fallback_key handles it
+        self.assertEqual(layout.gone_offline({"dp-a"}, []), set())
 
 
 if __name__ == "__main__":
