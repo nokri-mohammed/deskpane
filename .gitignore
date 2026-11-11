@@ -1,4 +1,6 @@
 /target
+# cargo build output anywhere, including standalone plugin crates under plugins/
+**/target/
 **/__pycache__/
 *.pyc
 /dist
@@ -8,3 +10,6 @@
 
 # paid art packs: licensed to the owner, must not be redistributed
 /assets/characters/
+
+# local preview venv (scripts/preview.sh)
+/.venv-preview/

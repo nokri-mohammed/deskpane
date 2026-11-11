@@ -1,0 +1,43 @@
+{
+  "v": 1,
+  "views": {
+    "stats": {
+      "devices": [
+        {
+          "device_id": "pi-zero",
+          "label": "Pi",
+          "hostname": "pi-zero",
+          "ip": "192.168.1.50",
+          "cpu_pct": 12.5,
+          "mem_used_mb": 210.0,
+          "mem_total_mb": 416.0,
+          "disk_used_gb": 4.5,
+          "disk_total_gb": 29.0,
+          "temp_c": 47.5,
+          "uptime_s": 3600.0,
+          "battery_pct": 87.0,
+          "charging": true,
+          "online": true,
+          "local": true
+        }
+      ]
+    },
+    "agents": {
+      "sessions": [
+        {
+          "sid": "0123456789ab",
+          "device_id": "pi-zero",
+          "label": "Pi",
+          "project": "deskpane",
+          "state": "needs_you",
+          "doing": "Bash",
+          "running_s": 600,
+          "state_s": 30,
+          "silent_s": 5,
+          "quiet": false,
+          "ctx": 42
+        }
+      ]
+    }
+  }
+}

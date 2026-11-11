@@ -36,7 +36,9 @@ STUBS = {
     "uname": 'case "$1" in -m) echo aarch64 ;; -s) echo Linux ;; *) echo Linux ;; esac',
     "systemctl": 'echo "systemctl $*" >>"$STUB_LOG"; exit 0',
     "dpkg-query": "exit 0",
-    "getent": "exit 0",
+    # GETENT_MISSING="group:pisugar" makes that one lookup fail
+    "getent": 'case " ${GETENT_MISSING:-} " in *" $1:$2 "*) exit 2 ;; esac; exit 0',
+    "groupadd": 'echo "groupadd $*" >>"$STUB_LOG"; exit 0',
     "useradd": 'echo "useradd $*" >>"$STUB_LOG"; exit 0',
     "userdel": 'echo "userdel $*" >>"$STUB_LOG"; exit 0',
     "apt-get": 'echo "apt-get $*" >>"$STUB_LOG"; exit 0',
@@ -159,9 +161,37 @@ class InstallCharactersTest(ShellTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(os.path.isdir(os.path.join(self.root, "opt/deskpane/current/dashboard")))
         self.assertFalse(os.path.exists(os.path.join(self.root, CHARACTERS)))
-        # the release carries the new pack modules
-        for name in ("charpack.py", "charpack_install.py", "sprites.py"):
+        # the release carries the new pack modules and the shared contract module
+        for name in ("charpack.py", "charpack_install.py", "sprites.py", "display.py", "deskpane_contract.py"):
             self.assertTrue(os.path.isfile(os.path.join(self.root, "opt/deskpane/current/dashboard", name)))
+
+    def _config_txt(self):
+        with open(os.path.join(self.root, "boot/firmware/config.txt")) as f:
+            return f.read()
+
+    def test_power_save_adds_a_reversible_config_block(self):
+        result = self.install("--power-save")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = self._config_txt()
+        self.assertIn("# >>> deskpane power-save", config)
+        self.assertIn("# <<< deskpane power-save", config)
+        self.assertIn("dtoverlay=disable-bt", config)
+        self.assertIn("dtparam=audio=off", config)
+        self.assertIn("dtparam=act_led_trigger=none", config)
+        # uninstall --purge removes the block and leaves no power-save lines
+        uninstall = os.path.join(self.root, "opt/deskpane/current/uninstall.sh")
+        if os.path.isfile(uninstall):
+            self.run_script(uninstall, "--purge")
+            after = self._config_txt()
+            self.assertNotIn("deskpane power-save", after)
+            self.assertNotIn("dtoverlay=disable-bt", after)
+
+    def test_default_install_has_no_power_save_block(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = self._config_txt()
+        self.assertNotIn("power-save", config)
+        self.assertNotIn("disable-bt", config)
 
     def test_good_zip_fills_the_folder_root_owned_0644(self):
         result = self.install("--characters", self.good_zip())
@@ -289,6 +319,45 @@ class InstallCharactersTest(ShellTestCase):
         result = self.install("--characters", "pack.zip")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(os.path.isfile(os.path.join(self.root, CHARACTERS, "NPC_1.png")))
+
+
+class PiSugarGroupTest(ShellTestCase):
+    """T-064: the reporter unit names SupplementaryGroups=pisugar, and systemd
+    refuses a unit whose group does not exist, so install.sh creates the
+    system group when it is missing and leaves an existing one alone."""
+
+    def install(self, *args, **env):
+        bundle = self.make_bundle()
+        return self.run_script(os.path.join(bundle, "install.sh"), "--overlay-file", self.overlay_file,
+                               *args, **env)
+
+    def test_missing_group_is_created_as_a_system_group(self):
+        result = self.install(GETENT_MISSING="group:pisugar")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("groupadd --system pisugar", self.stub_log())
+
+    def test_existing_group_is_left_alone(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("groupadd", self.stub_log())
+
+    def test_no_reporter_needs_no_group(self):
+        result = self.install("--no-reporter", GETENT_MISSING="group:pisugar")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("groupadd", self.stub_log())
+
+    def test_only_the_reporter_unit_gets_the_group(self):
+        units = os.path.join(REPO, "deploy", "systemd")
+        for name in sorted(os.listdir(units)):
+            with open(os.path.join(units, name)) as f:
+                text = f.read()
+            with self.subTest(unit=name):
+                if name == "deskpane-reporter.service":
+                    self.assertIn("\nSupplementaryGroups=pisugar\n", text)
+                    self.assertIn("AF_UNIX", text)
+                    self.assertNotIn("InaccessiblePaths", text)
+                else:
+                    self.assertNotIn("pisugar", text.lower())
 
 
 class UninstallTest(ShellTestCase):
@@ -469,9 +538,12 @@ class PackageBundleTest(ShellTestCase):
         result = self.package()
         self.assertEqual(result.returncode, 0, result.stderr)
         names = self.bundle_names()
-        for name in ("charpack.py", "charpack_install.py", "sprites.py"):
+        for name in ("charpack.py", "charpack_install.py", "sprites.py", "display.py", "deskpane_contract.py"):
             self.assertIn("deskpane-0.2.0-beta.1-pi-aarch64/dashboard/" + name, names)
         self.assertFalse([n for n in names if n.endswith((".png", ".zip"))])
+        # the PC preview (T-061) never ships to the Pi
+        for name in ("preview.py", "mock_daemon.py", "preview_scenarios.py"):
+            self.assertNotIn("deskpane-0.2.0-beta.1-pi-aarch64/dashboard/" + name, names)
 
     def test_pack_file_in_a_bundle_source_folder_fails_the_build(self):
         for planted in ("pi/NPC_1.png", "deploy/Emotes/Sad_emote_16x16.png", "pi/bot-characters.zip"):

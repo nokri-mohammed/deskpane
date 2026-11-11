@@ -19,6 +19,39 @@ so the report is dropped. A normal report is a few hundred bytes.
 > up for that). It is fine to run as-is on a trusted LAN in the meantime, not
 > fine to expose beyond it.
 
+## Versioning and compatibility
+
+This contract is a public interface: the daemon, the reporter and (from the
+plugin system, T-067) third-party data sources and panels all depend on it, so
+it changes under one rule.
+
+**Where the types live.** The wire types and their validators are the
+`deskpane-contract` crate (Rust library `deskpane_contract`, in `contract/`).
+The daemon re-exports it as `daemon::contract`, and the reporter depends on it
+too, so there is one definition of the shapes and limits, not a copy per binary.
+The dashboard side mirrors the envelope and its parser in `pi/deskpane_contract.py`.
+A plugin author gets the same types in the language they send from.
+
+**Every surface carries a `v`.** The report reply, the agent packet and the
+socket envelope each carry a version field (`v`), all `1` today. A reader that
+sees a `v` it does not know ignores that message rather than guessing.
+
+**The compatibility rule within a major version:**
+
+- Fields are only **added**, never removed and never repurposed. A new field is
+  optional, with a default, so an older reader simply ignores it
+  (`#[serde(default)]` on the Rust side, tolerant parsing on the Python side).
+- A reader therefore accepts a newer sender's message, and a newer reader
+  accepts an older sender's message. Unknown fields are dropped, not an error.
+
+**A breaking change bumps the major version.** Removing or repurposing a field,
+or changing its meaning, is a breaking change: it raises the version and ships
+as a `feat!` Conventional Commit, with a deprecation window where both versions
+are accepted. This is the discipline the plugin system leans on (T-014): plugins
+declare the `contract_version` and `host_api_version` they target, and a plugin
+that names a version the installed deskpane does not support is refused at load
+with one log line, not loaded against a contract it does not understand.
+
 ```json
 {
   "device_id": "my-server",
@@ -46,6 +79,8 @@ so the report is dropped. A normal report is a few hundred bytes.
 | `disk_used_gb` / `disk_total_gb` | number | Gigabytes, of `/`. |
 | `temp_c` | number | 0 if unavailable; the dashboard shows "N/A" for 0. |
 | `uptime_s` | number | Seconds since boot. |
+| `battery_pct` | number, optional | Battery charge in percent, 0 to 100. Left out by devices without a battery reading (T-064). The reference client sends it only with `--battery pisugar`. |
+| `charging` | bool, optional | `true` while on external power. Left out when unknown. |
 | `ack` | bool, optional | `true` asks the daemon for an `ok` reply (used by `deskpane report --once`). Missing means `false`. Not part of `Report`, so it never reaches the dashboard; daemons older than 0.1.0-beta.3 ignore it. |
 
 ### Default device id (reference client)
@@ -83,6 +118,8 @@ and never repeats the bad text.
 | `disk_used_gb`, `disk_total_gb` | `>= 0`, and `disk_used_gb <= disk_total_gb * 1.01`. |
 | `temp_c` | `-50` to `150`, both included. |
 | `uptime_s` | `>= 0`. |
+| `battery_pct` | Optional. When present, `0` to `100`, both included, and finite. A string or other type makes the whole report invalid JSON for the daemon. |
+| `charging` | Optional bool. |
 
 The dashboard also catches drawing errors per frame, so a report that passes
 these checks but still cannot be drawn shows an error screen for that page
@@ -279,7 +316,7 @@ envelope with one key for each view:
 | Field | Rule |
 |---|---|
 | `v` | Envelope version, `1`. |
-| `views.stats.devices` | The list of `DeviceStatus`: the report fields plus `"online": true` or `false`. Same content as the bare array of v0.1.x lines. |
+| `views.stats.devices` | The list of `DeviceStatus`: the report fields (with `battery_pct` and `charging` only when the report had them) plus `"online": true` or `false` and `"local": true` or `false`. `local` is `true` when the device's owner IP is a loopback address (the Pi's own reporter); the overview draws that device's battery. Same content as the bare array of v0.1.x lines, plus the new keys. |
 | `views.agents.sessions` | The list of agent sessions, below. Empty when none. |
 
 Each session:
@@ -297,6 +334,33 @@ Each session:
 | `silent_s` | integer | Seconds since the last packet. |
 | `quiet` | bool | `true` for a `working` session with no packet for 10 minutes. Never set for other states. |
 | `ctx` | integer or null | Always present. `null` until the client sends context use. |
+
+Compatibility of the battery fields (T-064): an old daemon ignores `battery_pct` and `charging`
+in a report (serde has no `deny_unknown_fields`), and an old dashboard ignores them and `local` in
+the socket line. A new dashboard with an old daemon finds none of them and draws no battery.
+
+### Reference client: `--battery pisugar`
+
+`deskpane report --battery pisugar`, or `BATTERY=pisugar` in the environment (Linux only; on
+Windows it is a usage error, exit 2; the flag wins over the variable) asks pisugar-server's Unix
+socket each cycle, one connection per question, with one 300 ms budget for the whole cycle (a
+wedged server costs 300 ms once, and the questions after it are not sent):
+`PISUGAR_SOCKET`, else `/run/pisugar/pisugar-server.sock`. It only ever sends these three fixed
+lines, from constants (the socket has no auth and also takes commands that change the board):
+
+| Line sent | Reply read | Used as |
+|---|---|---|
+| `get battery` | `battery: 87.53` | `battery_pct`: finite numbers up to 5 points outside 0 to 100 are clamped, anything else is no reading |
+| `get battery_power_plugged` | `battery_power_plugged: true` | `charging` on a PiSugar 3, tried first |
+| `get battery_charging` | `battery_charging: true` | `charging` on the PiSugar 2 family, tried when the first gives no answer |
+
+At most 128 bytes are read per reply; other lines (pisugar-server also writes button events such
+as `single`) are skipped, and only `true` or `false` count as a bool. No socket, no answer in time
+or a bad reply: the report goes out without the battery fields. The client logs one line at
+start and one each time the reading starts or stops working, never every cycle. An empty value
+(`--battery ""` or `BATTERY=`) counts as `none`. The Pi's reporter unit sets `BATTERY` through
+its environment file only, never on the command line, so an older binary without `--battery`
+still starts after a rollback.
 
 The dashboard also still reads the old bare array of `DeviceStatus`, so a new dashboard works
 with an old daemon. The report contract does not change, only the last hop does.

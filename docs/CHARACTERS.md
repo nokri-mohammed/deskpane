@@ -14,6 +14,10 @@ deskpane does not ship a pack and does not need a specific one.
   refuses to pack one. `assets/characters/` is in `.gitignore`.
 - A free pack (for example one with a CC0 licence) with the same layout works the same way.
   Check its licence before you share anything.
+- Vryell's [Tiny Neighbours](https://vryell.itch.io/tiny-neighbours) uses this layout. It is
+  free for personal and commercial use, and its page says not to resell or redistribute the
+  assets, so deskpane does not include it. Download it from the artist's page and install it
+  yourself with `--characters`. Credit is not required but appreciated: characters by Vryell.
 - This page describes the format in words only. It has no pack art.
 
 ## Pack format v1

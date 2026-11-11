@@ -1,10 +1,15 @@
 """Pure helpers for the dashboard screen: the installed version, where
-the overview page puts things, and the agents page (sorting, styles, rows,
+the overview page puts things, the battery icon (T-064), and the agents page (sorting, styles, rows,
 the overview line, the focus jump and the socket line shape). No pygame
 import, so tests run anywhere.
 """
 import os
 import re
+
+# the shared wire contract (the socket envelope and its parser); re-exported so
+# `layout.ENVELOPE_VERSION`, `layout.dict_items` and `layout.parse_socket_line`
+# keep working for the dashboard and the tests
+from deskpane_contract import ENVELOPE_VERSION, dict_items, parse_socket_line  # noqa: F401
 
 # the same version pattern install.sh accepts for the bundle's VERSION file
 VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$")
@@ -84,6 +89,140 @@ def version_position(height, version_h):
 
 
 # ---------------------------------------------------------------------------
+# Battery icon (T-064, docs/plans/2026-11-10-battery-agent-details-preview.md)
+# ---------------------------------------------------------------------------
+
+# under this percent the icon and its text turn red
+BATTERY_LOW_PCT = 20
+# the outline, the nub on its right, and the whole icon width
+BATTERY_BODY_W = 22
+BATTERY_BODY_H = 11
+BATTERY_NUB_W = 2
+BATTERY_NUB_H = 5
+BATTERY_W = BATTERY_BODY_W + BATTERY_NUB_W
+# the fill sits this far inside the outline
+BATTERY_INSET = 2
+# between the percent text and the icon, and from the screen edges
+BATTERY_TEXT_GAP = 4
+BATTERY_MARGIN = 8
+# the charging bolt left of the percent text
+BOLT_W = 7
+BOLT_GAP = 2
+
+
+def is_percent(value):
+    """True for an int or float (not a bool) that is finite and 0 to 100."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    # NaN fails both comparisons, infinity the range
+    return 0 <= value <= 100
+
+
+def battery_fields(device):
+    """(pct, charging) from one device of the socket line, or None when it
+    has no usable battery_pct. charging is True only for a real true."""
+    if not isinstance(device, dict):
+        return None
+    pct = device.get("battery_pct")
+    if not is_percent(pct):
+        return None
+    return float(pct), device.get("charging") is True
+
+
+def local_battery(devices):
+    """The battery of the Pi itself for the overview: the one online device
+    with local: true and battery fields. None when there is none, or more
+    than one (then it is not clear which is this Pi)."""
+    found = []
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        if device.get("local") is not True or device.get("online") is not True:
+            continue
+        fields = battery_fields(device)
+        if fields is not None:
+            found.append(fields)
+    if len(found) != 1:
+        return None
+    return found[0]
+
+
+def battery_style(pct, charging):
+    """Text, low flag and colour name for the icon. The text rounds down, so
+    19.9 shows "19%" in red and never a red "20%"."""
+    low = pct < BATTERY_LOW_PCT
+    return {
+        "text": "%d%%" % int(pct),
+        "low": low,
+        "charging": bool(charging),
+        "color": "red" if low else "text",
+    }
+
+
+def battery_geometry(x, y, pct):
+    """Shapes of the icon with its top-left corner at (x, y), as rects
+    (x, y, w, h). fill is None at 0 % and at least 1 px wide above it."""
+    inner_w = BATTERY_BODY_W - 2 * BATTERY_INSET
+    inner_h = BATTERY_BODY_H - 2 * BATTERY_INSET
+    fill_w = int(round(inner_w * pct / 100.0))
+    if pct > 0:
+        fill_w = max(1, fill_w)
+    fill = None
+    if fill_w > 0:
+        fill = (x + BATTERY_INSET, y + BATTERY_INSET, fill_w, inner_h)
+    return {
+        "body": (x, y, BATTERY_BODY_W, BATTERY_BODY_H),
+        "nub": (x + BATTERY_BODY_W, y + (BATTERY_BODY_H - BATTERY_NUB_H) // 2, BATTERY_NUB_W, BATTERY_NUB_H),
+        "fill": fill,
+    }
+
+
+def bolt_points(x, y):
+    """The charging mark: a 6-point lightning polygon in a BOLT_W x
+    BATTERY_BODY_H box with its top-left corner at (x, y), drawn as a shape
+    because the font has no lightning glyph. The two shoulders overlap by
+    two rows, so the middle never breaks at this size."""
+    return [
+        (x + 5, y),
+        (x, y + 6),
+        (x + 3, y + 6),
+        (x + 1, y + 10),
+        (x + 6, y + 4),
+        (x + 3, y + 4),
+    ]
+
+
+def battery_widget_layout(right, top, text_w, text_h, charging=False):
+    """Where the parts go, right to left: the icon ends at right, the
+    percent text sits left of it and, when charging, the bolt left of the
+    text; all centred on one line that starts at top. Returns {"icon":
+    (x, y), "text": (x, y), "bolt": (x, y) or None, "left": x of the whole
+    widget}."""
+    line_h = max(text_h, BATTERY_BODY_H)
+    icon_x = right - BATTERY_W
+    icon_y = top + (line_h - BATTERY_BODY_H) // 2
+    text_x = icon_x - BATTERY_TEXT_GAP - text_w
+    text_y = top + (line_h - text_h) // 2
+    bolt = None
+    left = text_x
+    if charging:
+        bolt = (text_x - BOLT_GAP - BOLT_W, icon_y)
+        left = bolt[0]
+    return {"icon": (icon_x, icon_y), "text": (text_x, text_y), "bolt": bolt, "left": left}
+
+
+# the device page hostname ends at least this far left of the battery (or clock)
+HOST_CLEAR_GAP = 8
+
+
+def host_max_w(host_x, clear_x):
+    """The widest the device page hostname may be: it starts at host_x and
+    ends HOST_CLEAR_GAP left of clear_x (the battery widget's left, or the
+    clock's without a battery). Never negative; fit_text cuts to it."""
+    return max(0, clear_x - HOST_CLEAR_GAP - host_x)
+
+
+# ---------------------------------------------------------------------------
 # Agents page (section 6 of docs/plans/2026-11-08-agent-status-view.md)
 # ---------------------------------------------------------------------------
 
@@ -95,8 +234,6 @@ MAX_ROW_H = 64
 # the focus jump: how long it lasts, and how recent a tap blocks it
 FOCUS_FOR_S = 30
 FOCUS_TAP_QUIET_S = 10
-# the envelope version this dashboard reads
-ENVELOPE_VERSION = 1
 ELLIPSIS = "\u2026"
 DOT = "\u00b7"
 
@@ -184,14 +321,28 @@ def agent_pages(count, per_page=AGENTS_PER_PAGE):
     return [(start, min(start + per_page, count)) for start in range(0, max(0, count), per_page)]
 
 
+# The page providers, in ring order. Each is (kind, enumerate) where enumerate
+# (device_count, session_count) returns that panel's page values: the overview
+# is always one page (value None); the agents panel is one page per slice of
+# sessions (none without sessions); the device panel is one page per device.
+# This is the pure half of the panel registry: the ring "comes from" this list,
+# and dashboard.py registers a draw function per kind in the same order. Adding
+# a panel kind later is one entry here plus its draw, not an edit to page_ring.
+PAGE_PROVIDERS = (
+    ("overview", lambda device_count, session_count: [None]),
+    ("agents", lambda device_count, session_count: agent_pages(session_count)),
+    ("device", lambda device_count, session_count: list(range(device_count))),
+)
+
+
 def page_ring(device_count, session_count):
     """The pages a tap cycles through: the overview, then the agents pages
-    (none without sessions), then one page per device."""
-    ring = [("overview", None)]
-    for page in agent_pages(session_count):
-        ring.append(("agents", page))
-    for index in range(device_count):
-        ring.append(("device", index))
+    (none without sessions), then one page per device. Built from
+    PAGE_PROVIDERS, in registration order."""
+    ring = []
+    for kind, enumerate_pages in PAGE_PROVIDERS:
+        for value in enumerate_pages(device_count, session_count):
+            ring.append((kind, value))
     return ring
 
 
@@ -296,30 +447,10 @@ def should_focus_agents(prev_states, new_states, last_tap, now):
     return False
 
 
-def dict_items(value):
-    """Only the dict items of a list; anything else is an empty list."""
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def parse_socket_line(obj):
-    """(devices, sessions) from one decoded socket line: the envelope
-    {"v": 1, "views": {"stats": {"devices": [...]}, "agents": {"sessions":
-    [...]}}}, or a legacy bare array of devices (one release of overlap).
-    None for anything else, so the caller keeps the last good line."""
-    if isinstance(obj, list):
-        return dict_items(obj), []
-    if not isinstance(obj, dict) or obj.get("v") != ENVELOPE_VERSION:
-        return None
-    views = obj.get("views")
-    if not isinstance(views, dict):
-        return None
-    stats = views.get("stats")
-    agents = views.get("agents")
-    devices = dict_items(stats.get("devices")) if isinstance(stats, dict) else []
-    sessions = dict_items(agents.get("sessions")) if isinstance(agents, dict) else []
-    return devices, sessions
+# the socket envelope shape and its parser now live in the shared Python
+# contract module (the mirror of the deskpane_contract Rust crate). Re-exported
+# here so every `layout.parse_socket_line` / `layout.ENVELOPE_VERSION` caller is
+# unchanged.
 
 
 def page_keys(ring, devices):
@@ -408,3 +539,50 @@ def step_focus(state, event, now):
             page_key = keys[(keys.index(page_key) + 1) % len(keys)]
 
     return {"page_key": page_key, "focus_until": focus_until, "focus_return": focus_return}
+
+
+# ---- display backend switch (T-061) ----
+
+# DESKPANE_DISPLAY values: the panel, a desktop window, offscreen PNG frames
+BACKENDS = ("fb", "window", "png")
+DEFAULT_BACKEND = "fb"
+# DESKPANE_SCALE: window size in multiples of the 480 x 320 panel
+MIN_SCALE = 1
+MAX_SCALE = 4
+DEFAULT_SCALE = 2
+
+
+def pick_backend(value):
+    """(backend, note) for a DESKPANE_DISPLAY value. Unset or empty is the
+    framebuffer, as on the Pi. An unknown value also falls back to the
+    framebuffer, with a note for the log; note is None otherwise."""
+    if value is None:
+        return DEFAULT_BACKEND, None
+    name = value.strip().lower()
+    if name == "":
+        return DEFAULT_BACKEND, None
+    if name in BACKENDS:
+        return name, None
+    return DEFAULT_BACKEND, "unknown DESKPANE_DISPLAY %r, using %s" % (value, DEFAULT_BACKEND)
+
+
+def pick_scale(value):
+    """The window scale from a DESKPANE_SCALE value: 1 to 4, default 2.
+    Out of range clamps; text that is not a number is the default."""
+    if value is None:
+        return DEFAULT_SCALE
+    try:
+        scale = int(value.strip())
+    except ValueError:
+        return DEFAULT_SCALE
+    return max(MIN_SCALE, min(MAX_SCALE, scale))
+
+
+def scale_tap(pos, scale, size=(480, 320)):
+    """A mouse position in the scaled preview window as a tap in panel
+    pixels, clamped to the screen. A scale below 1 counts as 1."""
+    factor = max(1, int(scale))
+    width, height = size
+    x = max(0, min(width - 1, int(pos[0]) // factor))
+    y = max(0, min(height - 1, int(pos[1]) // factor))
+    return x, y

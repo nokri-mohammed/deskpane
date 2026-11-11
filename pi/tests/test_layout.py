@@ -580,5 +580,193 @@ class StepFocusTest(unittest.TestCase):
         self.assertEqual(state, before)
 
 
+class DisplayBackendTest(unittest.TestCase):
+    """pick_backend and pick_scale read DESKPANE_DISPLAY and DESKPANE_SCALE
+    (T-061); the Pi sets neither, so it keeps the framebuffer."""
+
+    def test_unset_or_empty_is_the_framebuffer(self):
+        self.assertEqual(layout.pick_backend(None), ("fb", None))
+        self.assertEqual(layout.pick_backend(""), ("fb", None))
+
+    def test_known_values(self):
+        for value in ("fb", "window", "png"):
+            self.assertEqual(layout.pick_backend(value), (value, None))
+        self.assertEqual(layout.pick_backend(" Window "), ("window", None))
+
+    def test_unknown_value_falls_back_to_fb_with_a_note(self):
+        backend, note = layout.pick_backend("x11")
+        self.assertEqual(backend, "fb")
+        self.assertIn("x11", note)
+        self.assertIn("fb", note)
+
+    def test_scale_default_range_and_bad_values(self):
+        self.assertEqual(layout.pick_scale(None), 2)
+        self.assertEqual(layout.pick_scale(""), 2)
+        self.assertEqual(layout.pick_scale("3"), 3)
+        self.assertEqual(layout.pick_scale("0"), 1)
+        self.assertEqual(layout.pick_scale("9"), 4)
+        self.assertEqual(layout.pick_scale("big"), 2)
+
+
+class ScaleTapTest(unittest.TestCase):
+    """A click in the scaled preview window becomes a tap in panel pixels."""
+
+    def test_scales_one_to_four(self):
+        for scale in (1, 2, 3, 4):
+            self.assertEqual(layout.scale_tap((100 * scale, 50 * scale), scale), (100, 50))
+            self.assertEqual(layout.scale_tap((100 * scale + scale - 1, 50 * scale), scale), (100, 50))
+
+    def test_clicks_outside_clamp_to_the_screen(self):
+        self.assertEqual(layout.scale_tap((-5, -9), 2), (0, 0))
+        self.assertEqual(layout.scale_tap((5000, 5000), 2), (WIDTH - 1, HEIGHT - 1))
+        self.assertEqual(layout.scale_tap((960, 640), 2, (WIDTH, HEIGHT)), (WIDTH - 1, HEIGHT - 1))
+
+    def test_a_bad_scale_counts_as_one(self):
+        self.assertEqual(layout.scale_tap((10, 20), 0), (10, 20))
+
+
+class BatteryFieldsTest(unittest.TestCase):
+    """battery_fields reads the optional T-064 fields of one device."""
+
+    def test_absent_fields_are_none(self):
+        self.assertIsNone(layout.battery_fields({"device_id": "pi-zero"}))
+        self.assertIsNone(layout.battery_fields({"charging": True}))
+
+    def test_valid_fields(self):
+        self.assertEqual(layout.battery_fields({"battery_pct": 87.5, "charging": True}), (87.5, True))
+        self.assertEqual(layout.battery_fields({"battery_pct": 0}), (0.0, False))
+        self.assertEqual(layout.battery_fields({"battery_pct": 100, "charging": False}), (100.0, False))
+
+    def test_bad_values_are_none(self):
+        for pct in (-1, 100.5, float("nan"), float("inf"), "87", True, None, [50]):
+            with self.subTest(pct=pct):
+                self.assertIsNone(layout.battery_fields({"battery_pct": pct, "charging": False}))
+
+    def test_charging_must_be_exactly_true(self):
+        self.assertEqual(layout.battery_fields({"battery_pct": 50, "charging": "yes"}), (50.0, False))
+        self.assertEqual(layout.battery_fields({"battery_pct": 50, "charging": 1}), (50.0, False))
+
+    def test_not_a_dict_is_none(self):
+        self.assertIsNone(layout.battery_fields(None))
+        self.assertIsNone(layout.battery_fields([1, 2]))
+
+
+class LocalBatteryTest(unittest.TestCase):
+    """local_battery picks the battery of the Pi itself (local: true) for the
+    overview; nothing when there is none or the choice is not clear."""
+
+    def pi(self, pct=87, charging=True, **extra):
+        device = {"device_id": "pi-zero", "local": True, "online": True, "battery_pct": pct, "charging": charging}
+        device.update(extra)
+        return device
+
+    def test_none_without_devices_or_without_a_local_one(self):
+        self.assertIsNone(layout.local_battery([]))
+        laptop = {"device_id": "laptop", "online": True, "battery_pct": 50, "charging": False}
+        self.assertIsNone(layout.local_battery([laptop]))
+
+    def test_one_local_device(self):
+        desk = {"device_id": "desk-pc", "online": True}
+        self.assertEqual(layout.local_battery([desk, self.pi()]), (87.0, True))
+
+    def test_local_without_battery_is_none(self):
+        self.assertIsNone(layout.local_battery([{"device_id": "pi-zero", "local": True, "online": True}]))
+
+    def test_two_local_devices_is_none(self):
+        other = self.pi(pct=20, device_id="pi-two")
+        self.assertIsNone(layout.local_battery([self.pi(), other]))
+
+    def test_offline_or_not_exactly_true_local_is_skipped(self):
+        self.assertIsNone(layout.local_battery([self.pi(online=False)]))
+        self.assertIsNone(layout.local_battery([self.pi(local="true")]))
+
+
+class BatteryStyleTest(unittest.TestCase):
+    """battery_style: the text, the low flag (red under 20 %) and the colour
+    name; colour is never the only signal, the number says the same."""
+
+    def test_boundaries(self):
+        self.assertEqual(layout.battery_style(0, False), {"text": "0%", "low": True, "charging": False, "color": "red"})
+        self.assertEqual(layout.battery_style(19.9, False)["text"], "19%")
+        self.assertTrue(layout.battery_style(19.9, False)["low"])
+        self.assertEqual(layout.battery_style(20, False), {"text": "20%", "low": False, "charging": False, "color": "text"})
+        self.assertEqual(layout.battery_style(100, True), {"text": "100%", "low": False, "charging": True, "color": "text"})
+
+    def test_charging_low_is_still_red(self):
+        style = layout.battery_style(15, True)
+        self.assertTrue(style["charging"])
+        self.assertEqual(style["color"], "red")
+
+
+class BatteryGeometryTest(unittest.TestCase):
+    """battery_geometry: an outline 22 x 11 with a 2 x 5 nub on the right
+    and the fill in proportion; bolt_points: the charging mark."""
+
+    def test_full_and_empty(self):
+        full = layout.battery_geometry(100, 10, 100)
+        self.assertEqual(full["body"], (100, 10, 22, 11))
+        self.assertEqual(full["nub"], (122, 13, 2, 5))
+        self.assertEqual(full["fill"], (102, 12, 18, 7))
+        self.assertIsNone(layout.battery_geometry(100, 10, 0)["fill"])
+
+    def test_fill_is_proportional_and_never_vanishes_above_zero(self):
+        self.assertEqual(layout.battery_geometry(0, 0, 50)["fill"][2], 9)
+        self.assertEqual(layout.battery_geometry(0, 0, 1)["fill"][2], 1)
+        self.assertEqual(layout.battery_geometry(0, 0, 87)["fill"][2], 16)
+
+    def test_bolt_is_six_points_inside_its_box(self):
+        bolt = layout.bolt_points(40, 20)
+        self.assertEqual(len(bolt), 6)
+        for x, y in bolt:
+            self.assertTrue(40 <= x < 40 + layout.BOLT_W, (x, y))
+            self.assertTrue(20 <= y < 20 + layout.BATTERY_BODY_H, (x, y))
+
+    def test_widget_layout_right_aligned_text_left_of_icon(self):
+        place = layout.battery_widget_layout(472, 8, 30, 11)
+        # nub ends at the right edge
+        self.assertEqual(place["icon"][0] + layout.BATTERY_W, 472)
+        self.assertEqual(place["icon"][1], 8)
+        self.assertEqual(place["text"][0] + 30 + layout.BATTERY_TEXT_GAP, place["icon"][0])
+        self.assertEqual(place["text"][1], 8)
+        self.assertIsNone(place["bolt"])
+        self.assertEqual(place["left"], place["text"][0])
+        # a tall text moves the icon down to its middle instead
+        tall = layout.battery_widget_layout(472, 8, 30, 21)
+        self.assertEqual(tall["text"][1], 8)
+        self.assertEqual(tall["icon"][1], 13)
+
+    def test_charging_puts_the_bolt_left_of_the_text(self):
+        place = layout.battery_widget_layout(472, 8, 30, 11, charging=True)
+        bolt_x, bolt_y = place["bolt"]
+        self.assertEqual(bolt_x + layout.BOLT_W + layout.BOLT_GAP, place["text"][0])
+        self.assertEqual(bolt_y, place["icon"][1])
+        self.assertEqual(place["left"], bolt_x)
+
+    def test_device_page_hostname_ends_clear_of_the_battery(self):
+        # every character is 10 px wide; the hostname starts at x = 14
+        def measure(text):
+            return 10 * len(text)
+
+        place = layout.battery_widget_layout(400, 14, 30, 11, charging=True)
+        max_w = layout.host_max_w(14, place["left"])
+        self.assertEqual(max_w, place["left"] - layout.HOST_CLEAR_GAP - 14)
+        self.assertGreaterEqual(layout.HOST_CLEAR_GAP, 8)
+        long_host = "a-very-long-hostname-that-fills-the-whole-field-" + "z" * 16
+        shown = layout.fit_text(long_host, max_w, measure)
+        self.assertTrue(shown.endswith(layout.ELLIPSIS))
+        self.assertLessEqual(14 + measure(shown), place["left"] - 8)
+        # a short hostname is kept as is
+        self.assertEqual(layout.fit_text("pi-zero", max_w, measure), "pi-zero")
+        # no room at all is a width of 0, never negative
+        self.assertEqual(layout.host_max_w(14, 10), 0)
+
+    def test_overview_corner_stays_clear_of_the_clock(self):
+        # top right, 8 px in; the clock block starts lower (overview_layout)
+        place = layout.battery_widget_layout(WIDTH - layout.BATTERY_MARGIN, layout.BATTERY_MARGIN, 34, 11)
+        clock_y = layout.overview_layout(WIDTH, HEIGHT, CLOCK_H, DATE_H, SUMMARY_H, agents_h=11)["clock_y"]
+        self.assertLess(layout.BATTERY_MARGIN + 11, clock_y)
+        self.assertGreater(place["left"], WIDTH // 2)
+
+
 if __name__ == "__main__":
     unittest.main()

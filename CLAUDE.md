@@ -21,6 +21,7 @@ reporter (each device) --UDP JSON--> daemon (Pi) --Unix socket, one JSON line/se
   of silence, broadcasts a `Vec<DeviceStatus>` every second to Unix socket clients. Exits 11
   when UDP 8765 is taken.
 - `pi/` (Python, pygame): draws to the framebuffer (`/dev/fb1`, no X11), tap to change page.
+  `DESKPANE_DISPLAY` (`fb` default, `window`, `png`) switches the display for the PC preview.
 - `docs/CONTRACT.md` is the JSON wire shape and its limits. `daemon/src/contract.rs` holds the
   Rust types, `validate` and the limit constants.
 
@@ -31,6 +32,7 @@ daemon/src/
   lib.rs              pub mod agent_table; pub mod contract; pub mod device_table; pub mod services;
   contract.rs         Report, ReportPacket (+ ack), Reply, build_reply, validate,
                       check_device_id, limit constants (MAX_NAME_BYTES, MAX_REPLY_BYTES, ...);
+                      optional battery_pct / charging (MAX_BATTERY_PCT), DeviceStatus.local;
                       agent packets: PacketKind, parse_packet (kind probe), AgentPacket,
                       AgentState, validate_agent, AGENT_PACKET_VERSION, MAX_PROJECT_BYTES,
                       MAX_DOING_BYTES, SID_LEN; socket line: Envelope, AgentSession
@@ -40,7 +42,7 @@ daemon/src/
                       insert_agent (caps, IP ownership, per-key reorder guard, pending
                       needs_you keys per subagent, eviction -> AgentOutcome), forget_agents,
                       agent_session (running_s, state_s, silent_s, quiet)
-  main.rs             project logic: bind_error_message, store_report, store_agent,
+  main.rs             project logic: bind_error_message, is_local_owner, store_report, store_agent,
                       udp_server (kind dispatch, replies for reports only),
                       handle_agent_packet + agent_outcome_line (refusals through the log
                       limiter, new sessions always), forget_silent_devices,
@@ -56,7 +58,9 @@ daemon/src/
     unix_socket.rs    UnixSocketServer + Subscriber, #[cfg(unix)] only
 reporter/src/
   main.rs             clap CLI, resolve_identity, read_reply, review_replies, build_report,
-                      run (back-off loop), report_once; exit codes EXIT_USAGE 2, and for
+                      run (back-off loop), report_once; --battery (BatterySource,
+                      parse_battery_source, "" is none), BatteryProbe (plug query
+                      fallback, battery_change_line logs changes only); exit codes EXIT_USAGE 2, and for
                       --once only EXIT_ID_IN_USE 10, EXIT_NO_ANSWER 12; `deskpane agent`:
                       hook_main / run_hook (500 ms deadline, exit 0, no stdout), is_hook_call,
                       drain_hook_stdin, hook_args, install_hooks, uninstall_hooks,
@@ -75,14 +79,22 @@ reporter/src/
     conflict.rs       ConflictTracker: warn once, back off 300 s when a conflict outlasts the
                       grace window (run mode never exits on a conflict)
     machine_id.rs     read_machine_id per OS + pure parse_* and derive_device_id (sha2)
+    pisugar.rs        PiSugarClient (#[cfg(unix)]): ask(Query) sends one of three fixed get
+                      lines to pisugar-server's socket (default /run/pisugar/pisugar-server.sock,
+                      PISUGAR_SOCKET), one 300 ms deadline per cycle, 128-byte cap; pure parse_reply, parse_percent
+                      (clamp within 5 points), parse_bool
     system_stats.rs   SystemStats (sysinfo wrapper) + pure pick_disk_gb / pick_cpu_temp
 reporter/tests/
   agent_hook.rs       runs the real binary as a hook: stdout empty, exit 0, deadline, caps
   agent_setup.rs      runs hooks-snippet, install-hooks, uninstall-hooks, test (temp files only)
+  battery_env.rs      runs report with BATTERY from the environment and the older unit shapes
+                      against a fake pisugar socket; the reporter unit passes no --battery
 pi/
   dashboard.py        reads the socket, draws an overview page, then one device per page
   layout.py           pure helpers, no pygame: read_version, overview_layout (with the agents
-                      line), version_position; agents page: sort_agents, agent_style, page_ring,
+                      line), version_position; battery (T-064): battery_fields, local_battery,
+                      battery_style (red under 20), battery_geometry, bolt_points,
+                      battery_widget_layout, host_max_w; agents page: sort_agents, agent_style, page_ring,
                       agent_rows_layout, fmt_elapsed, agent_summary, fit_text,
                       should_focus_agents, parse_socket_line (envelope or legacy array)
   charpack.py         pure character pack helpers: pack format v1, frame_rect, looks,
@@ -91,10 +103,18 @@ pi/
   charpack_install.py stdlib pack installer, run as python3 -I, --check mode
   sprites.py          thin pygame loader and scaled-frame cache
   fb_display.py       framebuffer drawing
+  display.py          display backends: fb (FrameBuffer), window, png; PointerTaps; open_display
+                      (layout.py has the pure pick_backend, pick_scale, scale_tap)
   touch.py            evdev tap watcher
+  preview.py          PC preview runner (not in the bundle): args, frame server on 127.0.0.1,
+                      pack choice, --real stack (daemon, reporter, agent test on 127.0.0.1:18765)
+  mock_daemon.py      PC preview: Unix socket server writing scenario lines (not in the bundle)
+  preview_scenarios.py PC preview: pure scenario data, envelope_at(name, t) (not in the bundle)
   tests/              stdlib unittest: test_layout, test_charpack, test_charpack_install,
-                      test_deploy_characters (fake-root shell tests), fixtures.py (PNG and
-                      zip fixtures built in code)
+                      test_deploy_characters (fake-root shell tests), test_preview_scenarios,
+                      test_preview (headless smoke test skipped without .venv-preview),
+                      fixtures.py (PNG and zip fixtures built in code), fixtures/envelope_v1.json
+                      (golden socket line, checked by a daemon test in contract.rs)
 deploy/
   systemd/*.service   the four units the Pi bundle installs (static, user deskpane)
   install.sh          installs or upgrades the Pi bundle (runs as root on the Pi);
@@ -107,6 +127,7 @@ scripts/
   package-pi-bundle.sh  builds dist/deskpane-pi-aarch64.tar.gz
   provision-pi.sh       builds the bundle and runs its install.sh on a Pi over SSH
   check-no-pack-files.sh  licence guard: CI fails if git tracks a character pack file
+  preview.sh            PC preview of the dashboard (creates .venv-preview with pygame 2.6.1 once)
 docs/
   CONTRACT.md         JSON wire shape and report limits
   INSTALL.md          user install guide (Pi, Linux and Windows reporters)
@@ -130,16 +151,26 @@ Use `~/.cargo/bin/cargo`. `/usr/bin/cargo` is 1.75 and too old for this workspac
 `toolchain:` inputs in `.github/workflows/`.
 
 ```bash
-~/.cargo/bin/cargo test --workspace                                   # 447 tests: daemon 242, reporter 205
-python3 -m unittest discover -s pi/tests                             # 214 tests: layout 87, charpack 68, pack install 27, fake-root deploy 32 (CI runs it too)
+~/.cargo/bin/cargo test --workspace                                   # 489 tests: daemon 251, reporter 238
+python3 -m unittest discover -s pi/tests                             # 279 tests: layout 113, charpack 68, pack install 27, fake-root deploy 36, preview scenarios 19, preview 16 (CI runs it too)
 ~/.cargo/bin/cargo build --release --locked --target aarch64-unknown-linux-musl # Pi build, static (linker in .cargo/config.toml)
 scripts/package-pi-bundle.sh                                          # Pi bundle from that build, into dist/
 scripts/provision-pi.sh pi-zero                                       # bundle + install.sh on a Pi over SSH
 ~/.cargo/bin/cargo fmt --all --check                                  # CI runs these two as well
 ~/.cargo/bin/cargo clippy --workspace --all-targets --locked -- -D warnings
 SOCKET_PATH=/tmp/deskpane.sock ~/.cargo/bin/cargo run -p daemon      # LISTEN_ADDR, SOCKET_PATH (default /run/deskpane/daemon.sock), PROTOCOL
-~/.cargo/bin/cargo run -p reporter -- report --daemon 127.0.0.1:8765   # automatic id and label; --device-id, --label, --once
+~/.cargo/bin/cargo run -p reporter -- report --daemon 127.0.0.1:8765   # automatic id and label; --device-id, --label, --once, --battery pisugar (or BATTERY=pisugar)
+scripts/preview.sh                                # dashboard in a WSLg window, mock scenario busy, scale 2
+scripts/preview.sh --scenario worst --scale 3     # busy (normal), single, needs-you, worst, offline, battery, empty
+scripts/preview.sh --headless --serve 8780        # no window; live frames at http://localhost:8780 (127.0.0.1 only)
+scripts/preview.sh --headless --frames 20 --tap-every 3   # 20 PNGs in ~/.cache/deskpane-preview/, then exit
+scripts/preview.sh --real                         # real daemon + reporter + agent test on 127.0.0.1:18765 (PISUGAR_SOCKET=... adds --battery pisugar)
 ```
+
+Preview window keys: click, Space or Right arrow is a tap; N toggles the network problem screen
+(a tap there exits, as on the Pi); S saves a PNG to `~/.cache/deskpane-preview/`; Q or Esc quits.
+Frames can contain pack art, so they stay in the cache folder, never in the repo. Stop a headless
+run with Ctrl+C or `kill <pid>`.
 
 The Windows target (`x86_64-pc-windows-gnu`) builds in CI (`windows-check` job: clippy) and in the
 release workflow. Locally: `rustup target add x86_64-pc-windows-gnu`, then

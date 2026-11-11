@@ -141,6 +141,8 @@ mod tests {
             disk_total_gb: 2.0,
             temp_c: 40.0,
             uptime_s: 10.0,
+            battery_pct: None,
+            charging: None,
         }
     }
 

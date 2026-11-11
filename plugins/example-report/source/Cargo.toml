@@ -1,0 +1,35 @@
+[package]
+name = "deskpane-example-report"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+# a plugin is never published to crates.io; it ships inside the deskpane release
+publish = false
+
+[[bin]]
+name = "deskpane-example-report"
+path = "main.rs"
+
+# the same clippy allows the deskpane workspace uses, so a plugin written in the
+# repo's explicit match-style (no ? / if let / unwrap_or) stays warning-clean
+# under `clippy -D warnings`. A standalone plugin cannot inherit workspace lints,
+# so it repeats them here.
+[lints.clippy]
+redundant_field_names = "allow"
+needless_late_init = "allow"
+needless_bool_assign = "allow"
+single_match = "allow"
+manual_unwrap_or = "allow"
+manual_unwrap_or_default = "allow"
+question_mark = "allow"
+manual_map = "allow"
+match_like_matches_macro = "allow"
+redundant_pattern_matching = "allow"
+manual_range_contains = "allow"
+manual_ok_err = "allow"
+
+# a data source depends only on the SDK (which re-exports the contract). Keeping
+# the dependency set tiny is the point: CI can vet it, and there is no build.rs
+# or proc-macro to run code at build time.
+[dependencies]
+deskpane-sdk = { path = "../../../sdk" }

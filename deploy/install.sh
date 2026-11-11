@@ -14,6 +14,8 @@ CONFIG_DIR=/etc/deskpane
 UNIT_DIR=/etc/systemd/system
 BOOT_DIR=/boot/firmware
 SERVICE_USER=deskpane
+# the reporter unit's SupplementaryGroups: may read pisugar-server's socket (T-064)
+PISUGAR_GROUP=pisugar
 # optional character pack: state that outlives upgrades, never in a release
 STATE_DIR=/var/lib/deskpane
 CHARACTERS_DIR=$STATE_DIR/characters
@@ -40,6 +42,9 @@ Usage: sudo ./install.sh [options]
 
   --no-display         headless: no touchscreen overlay, boot config or dashboard
   --no-reporter        do not report the Pi's own stats
+  --power-save         turn off hardware the dashboard does not use (onboard
+                       audio, Bluetooth, the green activity LED) to save battery;
+                       reversible, removed by uninstall.sh. Needs a reboot.
   --device-id ID       device id for the Pi's own reporter (first install only),
                        letters, digits, dot, dash, underscore, up to 64
                        (default: automatic, derived from /etc/machine-id)
@@ -138,6 +143,7 @@ OLD_REMOVED=0
 OLD_DIRS=()
 WITH_DISPLAY=1
 WITH_REPORTER=1
+WITH_POWER_SAVE=0
 DEVICE_ID=""
 LABEL=""
 OVERLAY_FILE=""
@@ -147,6 +153,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-display) WITH_DISPLAY=0 ;;
     --no-reporter) WITH_REPORTER=0 ;;
+    --power-save) WITH_POWER_SAVE=1 ;;
     --device-id)
       [[ $# -ge 2 ]] || die "--device-id needs a value"
       DEVICE_ID="$2"
@@ -189,7 +196,8 @@ if [[ "$WITH_DISPLAY" -eq 1 && ! -f "$DESTDIR$BOOT_DIR/config.txt" ]]; then
 fi
 for f in VERSION LICENSE overlay.env config/env.example bin/deskpane-daemon bin/deskpane \
   dashboard/dashboard.py dashboard/fb_display.py dashboard/touch.py dashboard/layout.py \
-  dashboard/charpack.py dashboard/charpack_install.py dashboard/sprites.py \
+  dashboard/deskpane_contract.py \
+  dashboard/charpack.py dashboard/charpack_install.py dashboard/sprites.py dashboard/display.py \
   systemd/deskpane-daemon.service systemd/deskpane-dashboard.service \
   systemd/deskpane-reporter.service systemd/deskpane-unbind-fbcon.service; do
   [[ -f "$BUNDLE_DIR/$f" ]] || die "bundle is incomplete: $f is missing"
@@ -283,6 +291,19 @@ else
   say "creating system user $SERVICE_USER"
   useradd --system --user-group --no-create-home --home-dir /nonexistent \
     --shell /usr/sbin/nologin "$SERVICE_USER"
+fi
+
+# group pisugar for the reporter unit (SupplementaryGroups=pisugar, T-064).
+# systemd refuses to start a unit whose group does not exist, so it is made
+# here when missing. It grants nothing until pisugar-server is set up with
+# its socket in group pisugar (docs/INSTALL.md, "PiSugar battery").
+if [[ "$WITH_REPORTER" -eq 1 ]]; then
+  if getent group "$PISUGAR_GROUP" >/dev/null; then
+    say "group $PISUGAR_GROUP already exists"
+  else
+    say "creating system group $PISUGAR_GROUP (battery reading, optional)"
+    groupadd --system "$PISUGAR_GROUP"
+  fi
 fi
 
 # copy this release to /opt, owned by root so the service user cannot change it
@@ -401,6 +422,42 @@ if [[ "$WITH_DISPLAY" -eq 1 ]]; then
     CMDLINE="$(head -n 1 "$CMDLINE_TXT" | sed 's/[[:space:]]*$//')"
     printf '%s fbcon=map:1\n' "$CMDLINE" >"$CMDLINE_TXT.new"
     mv -f "$CMDLINE_TXT.new" "$CMDLINE_TXT"
+    sync
+    REBOOT_NEEDED=1
+  fi
+fi
+
+# --power-save: turn off hardware the dashboard never uses, to stretch the
+# battery. Independent of the display, its own marked block so uninstall.sh can
+# remove it cleanly. Note: on this screen (fb_ili9486) the backlight is wired on
+# and cannot be controlled in software, so this is modest; the big saving needs
+# a backlight-on-GPIO modification (see the carrier board plan, T-066).
+PS_MARK_BEGIN="# >>> deskpane power-save"
+PS_MARK_END="# <<< deskpane power-save"
+if [[ "$WITH_POWER_SAVE" -eq 1 ]]; then
+  CONFIG_TXT="$DESTDIR$BOOT_DIR/config.txt"
+  if [[ ! -f "$CONFIG_TXT" ]]; then
+    say "no $CONFIG_TXT, skipping --power-save"
+  elif grep -qF "$PS_MARK_BEGIN" "$CONFIG_TXT"; then
+    say "config.txt already has the power-save block"
+  else
+    say "adding the power-save block to config.txt (audio, Bluetooth, activity LED off)"
+    backup_once "$CONFIG_TXT"
+    {
+      echo ""
+      echo "$PS_MARK_BEGIN"
+      # apply to every board revision
+      echo "[all]"
+      echo "# deskpane power saving (reversible via uninstall.sh): turn off"
+      echo "# hardware the dashboard does not use. A later dtparam wins, so"
+      echo "# audio=off here overrides an earlier audio=on."
+      echo "dtparam=audio=off"
+      echo "dtoverlay=disable-bt"
+      echo "# the green activity LED"
+      echo "dtparam=act_led_trigger=none"
+      echo "dtparam=act_led_activelow=off"
+      echo "$PS_MARK_END"
+    } >>"$CONFIG_TXT"
     sync
     REBOOT_NEEDED=1
   fi

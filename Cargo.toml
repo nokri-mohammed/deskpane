@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["daemon", "reporter"]
+members = ["contract", "sdk", "daemon", "reporter"]
+# plugin crates build standalone (their own Cargo.lock, pinned deps), so they
+# are not workspace members; exclude keeps `cargo build --workspace` from
+# absorbing them while they still live in the tree under plugins/.
+exclude = ["plugins"]
 
 # one version for the whole project (daemon, reporter, dashboard), bumped by release-please
 [workspace.package]

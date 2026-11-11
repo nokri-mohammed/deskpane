@@ -110,7 +110,7 @@ Limits of this design:
 
 ## Agent status packets
 
-From version 0.2.0-beta.1, a computer can send the status of its Claude Code sessions to the
+From version 0.1.0-beta.4, a computer can send the status of its Claude Code sessions to the
 same UDP port. A hook runs `deskpane agent` at each event and the daemon shows one row for each
 session. [docs/CONTRACT.md](docs/CONTRACT.md) has the packet.
 

@@ -126,6 +126,17 @@ fn reply_source(peer: SocketAddr) -> std::net::IpAddr {
 }
 
 /*
+ * true when a device's owner is this machine (127.0.0.1, ::1 or the
+ * IPv4-mapped form): the dashboard draws that device's battery on the
+ * overview. Linux drops packets from the network with a loopback source.
+ *
+ * owner: the owner IP stored with the device
+ */
+fn is_local_owner(owner: std::net::IpAddr) -> bool {
+    owner.to_canonical().is_loopback()
+}
+
+/*
  * stores a report under the table policy; the owner is the source IP only,
  * so a restarted reporter (new random port) keeps its id
  *
@@ -429,6 +440,7 @@ async fn broadcast_statuses(state: &SharedState, broadcaster: &Broadcaster) {
         let status = DeviceStatus {
             report: entry.report.clone(),
             online: online,
+            local: is_local_owner(entry.owner),
         };
         statuses.push(status);
     }
@@ -577,6 +589,8 @@ mod tests {
             disk_total_gb: 2.0,
             temp_c: 40.0,
             uptime_s: 10.0,
+            battery_pct: None,
+            charging: None,
         }
     }
 
@@ -621,6 +635,34 @@ mod tests {
         let outcome = store_report(&mut table, report("my-pc"), mapped, now);
 
         assert_eq!(outcome, InsertOutcome::Stored);
+    }
+
+    #[test]
+    fn loopback_owner_is_local_and_a_lan_owner_is_not() {
+        let v4: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let v6: std::net::IpAddr = "::1".parse().unwrap();
+        let mapped: std::net::IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        let lan: std::net::IpAddr = "192.168.1.60".parse().unwrap();
+        let lan_mapped: std::net::IpAddr = "::ffff:192.168.1.60".parse().unwrap();
+        assert!(is_local_owner(v4));
+        assert!(is_local_owner(v6));
+        assert!(is_local_owner(mapped));
+        assert!(!is_local_owner(lan));
+        assert!(!is_local_owner(lan_mapped));
+    }
+
+    #[test]
+    fn stored_battery_reaches_the_table_unchanged() {
+        let mut table: DeviceTable = HashMap::new();
+        let mut report = report("pi-zero");
+        report.battery_pct = Some(15.0);
+        report.charging = Some(false);
+        let peer: SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        store_report(&mut table, report, peer, Instant::now());
+        let entry = table.get("pi-zero").unwrap();
+        assert_eq!(entry.report.battery_pct, Some(15.0));
+        assert_eq!(entry.report.charging, Some(false));
+        assert!(is_local_owner(entry.owner));
     }
 
     #[test]
