@@ -162,12 +162,38 @@ class InstallCharactersTest(ShellTestCase):
         self.assertTrue(os.path.isdir(os.path.join(self.root, "opt/deskpane/current/dashboard")))
         self.assertFalse(os.path.exists(os.path.join(self.root, CHARACTERS)))
         # the release carries the new pack modules and the shared contract module
-        for name in ("charpack.py", "charpack_install.py", "sprites.py", "display.py", "deskpane_contract.py"):
+        for name in ("charpack.py", "charpack_install.py", "sprites.py", "display.py", "deskpane_contract.py",
+                     "panels.py"):
             self.assertTrue(os.path.isfile(os.path.join(self.root, "opt/deskpane/current/dashboard", name)))
 
     def _config_txt(self):
         with open(os.path.join(self.root, "boot/firmware/config.txt")) as f:
             return f.read()
+
+    def test_plugin_panel_files_in_the_bundle_are_installed(self):
+        bundle = self.make_bundle()
+        good = os.path.join(bundle, "plugins", "weather", "panel")
+        os.makedirs(good)
+        with open(os.path.join(good, "weather.panel.toml"), "w") as f:
+            f.write('schema = "deskpane.panel/1"\n')
+        # a name that is not a plugin name, and a symlink, are never installed
+        bad = os.path.join(bundle, "plugins", "Bad", "panel")
+        os.makedirs(bad)
+        with open(os.path.join(bad, "Bad.panel.toml"), "w") as f:
+            f.write("x\n")
+        linked = os.path.join(bundle, "plugins", "linked", "panel")
+        os.makedirs(linked)
+        os.symlink("/etc/passwd", os.path.join(linked, "linked.panel.toml"))
+        result = self.run_script(os.path.join(bundle, "install.sh"), "--no-reporter",
+                                 "--overlay-file", self.overlay_file)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plugins = os.path.join(self.root, "opt/deskpane/current/plugins")
+        installed = os.path.join(plugins, "weather", "panel", "weather.panel.toml")
+        self.assertTrue(os.path.isfile(installed))
+        self.assertFalse(os.path.islink(installed))
+        self.assertEqual(os.stat(installed).st_mode & 0o777, 0o644)
+        self.assertFalse(os.path.exists(os.path.join(plugins, "Bad")))
+        self.assertFalse(os.path.exists(os.path.join(plugins, "linked")))
 
     def test_power_save_adds_a_reversible_config_block(self):
         result = self.install("--power-save")
@@ -538,12 +564,50 @@ class PackageBundleTest(ShellTestCase):
         result = self.package()
         self.assertEqual(result.returncode, 0, result.stderr)
         names = self.bundle_names()
-        for name in ("charpack.py", "charpack_install.py", "sprites.py", "display.py", "deskpane_contract.py"):
+        for name in ("charpack.py", "charpack_install.py", "sprites.py", "display.py", "deskpane_contract.py",
+                     "panels.py"):
             self.assertIn("deskpane-0.2.0-beta.1-pi-aarch64/dashboard/" + name, names)
         self.assertFalse([n for n in names if n.endswith((".png", ".zip"))])
         # the PC preview (T-061) never ships to the Pi
         for name in ("preview.py", "mock_daemon.py", "preview_scenarios.py"):
             self.assertNotIn("deskpane-0.2.0-beta.1-pi-aarch64/dashboard/" + name, names)
+
+    def test_plugin_panel_files_ship_and_plugin_source_does_not(self):
+        panel_dir = os.path.join(self.fake_repo, "plugins", "weather", "panel")
+        os.makedirs(panel_dir)
+        with open(os.path.join(panel_dir, "weather.panel.toml"), "w") as f:
+            f.write('schema = "deskpane.panel/1"\n')
+        source_dir = os.path.join(self.fake_repo, "plugins", "weather", "source")
+        os.makedirs(source_dir)
+        with open(os.path.join(source_dir, "main.rs"), "w") as f:
+            f.write("fn main() {}\n")
+        # a stray file whose name does not match its plugin folder is left out
+        with open(os.path.join(panel_dir, "other.panel.toml"), "w") as f:
+            f.write("x\n")
+        result = self.package()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        names = self.bundle_names()
+        top = "deskpane-0.2.0-beta.1-pi-aarch64/"
+        self.assertIn(top + "plugins/weather/panel/weather.panel.toml", names)
+        self.assertNotIn(top + "plugins/weather/panel/other.panel.toml", names)
+        self.assertFalse([n for n in names if "/source" in n or n.endswith(".rs")])
+
+    def test_a_symlinked_plugin_folder_is_not_followed(self):
+        # security review LOW-2: what ships is only what is in the repo itself
+        outside = os.path.join(self.tmp, "outside", "panel")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "sneaky.panel.toml"), "w") as f:
+            f.write("x\n")
+        os.makedirs(os.path.join(self.fake_repo, "plugins"))
+        os.symlink(os.path.dirname(outside), os.path.join(self.fake_repo, "plugins", "sneaky"))
+        linked = os.path.join(self.fake_repo, "plugins", "inner")
+        os.makedirs(linked)
+        os.symlink(outside, os.path.join(linked, "panel"))
+        with open(os.path.join(outside, "inner.panel.toml"), "w") as f:
+            f.write("x\n")
+        result = self.package()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse([n for n in self.bundle_names() if "/plugins/" in n])
 
     def test_pack_file_in_a_bundle_source_folder_fails_the_build(self):
         for planted in ("pi/NPC_1.png", "deploy/Emotes/Sad_emote_16x16.png", "pi/bot-characters.zip"):

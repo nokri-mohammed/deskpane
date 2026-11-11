@@ -16,8 +16,14 @@ Environment=SOCKET_PATH=/run/deskpane/daemon.sock
 Environment=CHARACTERS_DIR=/var/lib/deskpane/characters
 # the install directory is read-only for this user, so do not try to write .pyc files
 Environment=PYTHONDONTWRITEBYTECODE=1
+# plugin panel files ship in the release; PANELS in the env file turns pages on
+Environment=PLUGINS_DIR=/opt/deskpane/current/plugins
+EnvironmentFile=-/etc/deskpane/env
 WorkingDirectory=/opt/deskpane/current/dashboard
-ExecStart=/usr/bin/python3 /opt/deskpane/current/dashboard/dashboard.py
+# -E ignores PYTHON* variables (the env file cannot steer the interpreter), -s
+# skips the user site folder, -B writes no .pyc; not -I, which would drop the
+# dashboard folder from sys.path and break its own imports
+ExecStart=/usr/bin/python3 -E -s -B /opt/deskpane/current/dashboard/dashboard.py
 # on-failure, not always: a tap-to-exit (clean exit 0) should stay exited,
 # only a crash (nonzero exit) should auto-restart.
 Restart=on-failure

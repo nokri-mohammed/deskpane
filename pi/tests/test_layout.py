@@ -252,6 +252,26 @@ class AgentPagesTest(unittest.TestCase):
     def test_page_ring_without_sessions_has_no_agents_page(self):
         self.assertEqual(layout.page_ring(1, 0), [("overview", None), ("device", 0)])
 
+    def test_plugin_pages_come_after_the_devices(self):
+        # no panel turned on: the ring is exactly what it was before plugins
+        self.assertEqual(layout.page_ring(1, 0, 0), [("overview", None), ("device", 0)])
+        self.assertEqual(layout.page_ring(1, 0, 1), [("overview", None), ("device", 0), ("plugin", 0)])
+        self.assertEqual(layout.page_ring(0, 6, 3), [
+            ("overview", None), ("agents", (0, 5)), ("agents", (5, 6)),
+            ("plugin", 0), ("plugin", 1), ("plugin", 2),
+        ])
+
+    def test_a_plugin_page_is_keyed_by_its_plugin_name(self):
+        panels = [{"plugin": "weather"}, {"plugin": "ups-2"}]
+        devices = [{"device_id": "dp-1"}]
+        ring = layout.page_ring(1, 0, 2)
+        self.assertEqual(layout.page_keys(ring, devices, panels), [
+            ("overview", None), ("device", "dp-1"), ("plugin", "weather"), ("plugin", "ups-2"),
+        ])
+        # without panels, page_keys reads as before
+        self.assertEqual(layout.page_keys(layout.page_ring(1, 0), devices),
+                         [("overview", None), ("device", "dp-1")])
+
 
 class AgentRowsLayoutTest(unittest.TestCase):
     def test_single_session_gets_card_layout(self):
@@ -357,6 +377,36 @@ class FitTextTest(unittest.TestCase):
 
     def test_fit_text_too_narrow_for_anything_is_empty(self):
         self.assertEqual(layout.fit_text("abcdef", 5, self.measure), "")
+
+    def test_fit_text_measures_a_handful_of_times_not_once_per_character(self):
+        # security review MEDIUM-1: a 48-character label used to cost up to 47
+        # measurements a frame; a binary search needs about 7
+        calls = []
+
+        def counting(text):
+            calls.append(text)
+            return 10 * len(text)
+        result = layout.fit_text("x" * 48, 105, counting)
+        self.assertEqual(result, "x" * 9 + layout.ELLIPSIS)
+        self.assertLessEqual(len(calls), 8)
+
+    def test_fit_text_matches_the_one_by_one_answer(self):
+        # the longest prefix that fits, for every width, even with odd widths
+        def uneven(text):
+            return sum(14 if char in "mw" else 6 for char in text)
+        text = "mwa bmw cmw dmwmw e fmm"
+        for max_w in range(0, uneven(text) + 20):
+            want = ""
+            if uneven(text) <= max_w:
+                want = text
+            else:
+                for end in range(len(text) - 1, 0, -1):
+                    candidate = text[:end].rstrip() + layout.ELLIPSIS
+                    if uneven(candidate) <= max_w:
+                        want = candidate
+                        break
+            with self.subTest(max_w=max_w):
+                self.assertEqual(layout.fit_text(text, max_w, uneven), want)
 
     def test_fit_text_empty_and_none(self):
         self.assertEqual(layout.fit_text("", 50, self.measure), "")

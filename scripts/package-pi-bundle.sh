@@ -87,11 +87,22 @@ install -m 0644 "$REPO/LICENSE" "$REPO/deploy/README.txt" "$REPO/deploy/overlay.
 install -m 0755 "$REPO/deploy/install.sh" "$REPO/deploy/uninstall.sh" "$DIR/"
 install -m 0755 "$BIN_DIR/deskpane-daemon" "$BIN_DIR/deskpane" "$DIR/bin/"
 install -m 0644 "$REPO/pi/dashboard.py" "$REPO/pi/fb_display.py" "$REPO/pi/touch.py" "$REPO/pi/layout.py" \
-  "$REPO/pi/deskpane_contract.py" \
+  "$REPO/pi/deskpane_contract.py" "$REPO/pi/panels.py" \
   "$REPO/pi/charpack.py" "$REPO/pi/charpack_install.py" "$REPO/pi/sprites.py" "$REPO/pi/display.py" \
   "$DIR/dashboard/"
 install -m 0644 "$REPO"/deploy/systemd/*.service "$DIR/systemd/"
 install -m 0644 "$REPO/deploy/env.example" "$DIR/config/"
+
+# plugin panel files only (never plugin source): plugins/<name>/panel/<name>.panel.toml,
+# a regular file whose folder is a plugin name; PANELS on the Pi turns them on
+for panel in "$REPO"/plugins/*/panel/*.panel.toml; do
+  [[ -f "$panel" && ! -L "$panel" ]] || continue
+  name="$(basename "$(dirname "$(dirname "$panel")")")"
+  [[ "$name" =~ ^[a-z][a-z0-9-]{0,31}$ && "$(basename "$panel")" == "$name.panel.toml" ]] || continue
+  # never through a symlinked plugin or panel folder
+  [[ ! -L "$REPO/plugins/$name" && ! -L "$REPO/plugins/$name/panel" ]] || continue
+  install -D -m 0644 "$panel" "$DIR/plugins/$name/panel/$name.panel.toml"
+done
 
 # the staged bundle itself: no images or zips at all, whatever their name
 STAGED_MEDIA="$(find "$DIR" \( -iname '*.png' -o -iname '*.zip' \) -print || true)"

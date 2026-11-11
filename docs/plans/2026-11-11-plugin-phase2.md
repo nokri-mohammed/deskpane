@@ -151,6 +151,20 @@ the 480 x 256 content rect, all numbers finite.
 stale and missing values, the ring builder with 0, 1 and 3 enabled panels, and a lockstep test
 that `PANEL_DRAW` and `PAGE_PROVIDERS` still agree.
 
+**Built (2026-11-11):** as planned, with these details settled in code and `docs/PANELS.md`.
+- `%` shows the value as a whole percent and does not multiply by 100, so `rain_pct = 40` reads
+  `40%`.
+- `d` rounds halves away from zero.
+- The format field must be the element's own `bind`.
+- A text element with `bind` needs a `format`.
+- Thresholds use strict comparisons, and the first match wins.
+- Icons sit in a 24 px box.
+- The dashboard unit now reads `/etc/deskpane/env` (`EnvironmentFile=-`) for `PANELS` and sets
+  `PLUGINS_DIR`.
+- The bundle and `install.sh` copy only `plugins/<name>/panel/<name>.panel.toml` regular files with
+  a valid name (never source or symlinks).
+- `tomllib` is imported lazily, so the 3.7 local preview still runs and just loads no panels.
+
 ## Slice 3: `scripts/preview.sh --plugin` and an example panel
 
 - `scripts/preview.sh --plugin plugins/<name>` loads that panel and enables it in the preview.

@@ -196,7 +196,7 @@ if [[ "$WITH_DISPLAY" -eq 1 && ! -f "$DESTDIR$BOOT_DIR/config.txt" ]]; then
 fi
 for f in VERSION LICENSE overlay.env config/env.example bin/deskpane-daemon bin/deskpane \
   dashboard/dashboard.py dashboard/fb_display.py dashboard/touch.py dashboard/layout.py \
-  dashboard/deskpane_contract.py \
+  dashboard/deskpane_contract.py dashboard/panels.py \
   dashboard/charpack.py dashboard/charpack_install.py dashboard/sprites.py dashboard/display.py \
   systemd/deskpane-daemon.service systemd/deskpane-dashboard.service \
   systemd/deskpane-reporter.service systemd/deskpane-unbind-fbcon.service; do
@@ -315,6 +315,16 @@ install -d -m 0755 "$RELEASE_DIR.new/bin" "$RELEASE_DIR.new/dashboard"
 install -m 0755 "$BUNDLE_DIR/bin/deskpane-daemon" "$BUNDLE_DIR/bin/deskpane" "$RELEASE_DIR.new/bin/"
 install -m 0644 "$BUNDLE_DIR"/dashboard/*.py "$RELEASE_DIR.new/dashboard/"
 install -m 0644 "$BUNDLE_DIR/VERSION" "$BUNDLE_DIR/LICENSE" "$RELEASE_DIR.new/"
+# plugin panel files (declarative, no code): only <name>/panel/<name>.panel.toml,
+# a regular file with a plugin name; the dashboard loads the ones PANELS turns on
+for panel in "$BUNDLE_DIR"/plugins/*/panel/*.panel.toml; do
+  [[ -f "$panel" && ! -L "$panel" ]] || continue
+  name="$(basename "$(dirname "$(dirname "$panel")")")"
+  [[ "$name" =~ ^[a-z][a-z0-9-]{0,31}$ && "$(basename "$panel")" == "$name.panel.toml" ]] || continue
+  # never through a symlinked plugin or panel folder
+  [[ ! -L "$BUNDLE_DIR/plugins/$name" && ! -L "$BUNDLE_DIR/plugins/$name/panel" ]] || continue
+  install -D -m 0644 "$panel" "$RELEASE_DIR.new/plugins/$name/panel/$name.panel.toml"
+done
 rm -rf "$RELEASE_DIR"
 mv "$RELEASE_DIR.new" "$RELEASE_DIR"
 

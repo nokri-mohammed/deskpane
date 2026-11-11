@@ -67,6 +67,26 @@ empty `{}`, unknown field name. Rationale: Python's format mini-language reaches
 through attribute and index access, which would be arbitrary code in the dashboard process delivered
 by a file CI treats as "just data".
 
+Built in Phase 2 slice 2 (`pi/panels.py`, `parse_format` and `format_value`): the field must be
+the element's own `bind`, the spec one of `d`, `.0f`, `.1f`, `.2f`, `%`, and the value text comes
+from deskpane's own spec table with its length bounded. `pi/tests/test_panel_files.py` holds the
+adversarial set (22 formats, among them `{x.__class__}`, `{0}`, `{}`, `{{x}}`, `{x!r}`,
+`{x:>{n}}`, `{x[0]}` and a second field).
+
+Slice 2 security review (2026-11-11): ship after fixes. All six findings are fixed in the same PR.
+
+| Finding | Fix |
+|---|---|
+| MEDIUM-1: per-frame text fitting cost about 150 ms on x86 | binary-search `fit_text`, a fitted-text cache, at most 8 huge or big texts, and the draw-cost budget above (100 ms for 3 frames in a row, then a placeholder). Worst case is now 2 to 5 ms. |
+| LOW-1: opening a FIFO blocked start-up | `O_NONBLOCK` and a read loop |
+| LOW-2: symlinked plugin folders were followed by the bundler and install | those folders are skipped |
+| LOW-3: number edge cases (`-0`, a float trap at 0.5) | fixed in `format_value` |
+| LOW-4: noncharacters, private use and combining-mark stacks were accepted | refused |
+| LOW-5: the env file could set `PYTHON*` variables | the dashboard runs `python3 -E -s -B` |
+
+Open for Phase 3: `PLUGINS_DIR` can point outside the signed bundle. That is fine for declarative
+panels only. Code panels must load only from the signed, pinned bundle.
+
 ### 2. `allowlisted_get` resolves and pins (SSRF blocked at the fetcher)
 
 The SDK's `allowlisted_get` is the only fetch path for data sources and must:
