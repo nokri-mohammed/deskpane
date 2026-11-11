@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.0-beta.6](https://github.com/nokri-mohammed/deskpane/compare/v0.1.0-beta.5...v0.1.0-beta.6) (2026-11-11)
+
+
+### Features
+
+* **contract:** metric packet for plugin numbers ([#10](https://github.com/nokri-mohammed/deskpane/issues/10)) ([c037495](https://github.com/nokri-mohammed/deskpane/commit/c03749583d5fe037154279ecafcc3089cee41c02))
+* **dashboard:** declarative plugin panels ([#12](https://github.com/nokri-mohammed/deskpane/issues/12)) ([6e2ca6c](https://github.com/nokri-mohammed/deskpane/commit/6e2ca6ca5067523cf00f51cdc32b3ed76feef1d1))
+
 ## [0.1.0-beta.5](https://github.com/nokri-mohammed/deskpane/compare/v0.1.0-beta.4...v0.1.0-beta.5) (2026-11-11)
 
 
