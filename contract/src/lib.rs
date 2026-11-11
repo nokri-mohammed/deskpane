@@ -1,6 +1,7 @@
 //! The JSON shape every reporting device sends, and the shape the daemon
 //! relays to the dashboard. See docs/CONTRACT.md for the full spec.
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
@@ -504,11 +505,26 @@ pub struct AgentsView {
     pub sessions: Vec<AgentSession>,
 }
 
+/// One plugin's numbers as the daemon pushes them to the dashboard.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricView {
+    // the plugin's latest values, key -> number
+    pub values: BTreeMap<String, f64>,
+    // seconds since the daemon last heard from the plugin
+    pub age_s: u64,
+    // older than the packet's ttl_s: the panel shows its missing text
+    pub stale: bool,
+}
+
 /// The views in one socket line; later views add keys here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Views {
     pub stats: StatsView,
     pub agents: AgentsView,
+    // plugin name -> its numbers; left out of the line when no plugin reports,
+    // and absent from daemons older than the metric packet
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metrics: BTreeMap<String, MetricView>,
 }
 
 /// One line on the dashboard socket: {"v":1,"views":{"stats":..,"agents":..}}
@@ -518,11 +534,12 @@ pub struct Envelope {
     pub views: Views,
 }
 
-/// A packet after the kind probe: a report or an agent packet.
+/// A packet after the kind probe: a report, an agent packet or a metric packet.
 #[derive(Debug, Clone)]
 pub enum ParsedPacket {
     Report(ReportPacket),
     Agent(AgentPacket),
+    Metric(MetricPacket),
 }
 
 /// Why a packet could not be parsed. Every reason is safe to log.
@@ -534,6 +551,8 @@ pub enum PacketError {
     BadReport(String),
     // kind agent, but not the agent shape; the reason never repeats a value
     BadAgent(String),
+    // kind metric, but not the metric shape; the reason never repeats a value
+    BadMetric(String),
     // a kind this daemon does not know; the kind itself is never repeated
     UnknownKind,
 }
@@ -570,6 +589,20 @@ pub fn parse_packet(bytes: &[u8]) -> Result<ParsedPacket, PacketError> {
             };
         }
     };
+
+    if kind == PACKET_KIND_METRIC {
+        // serde messages can quote the bad value, so only the column is kept
+        let parsed = serde_json::from_slice::<MetricPacket>(bytes);
+        return match parsed {
+            Ok(p) => Ok(ParsedPacket::Metric(p)),
+            Err(e) => {
+                let column = e.column();
+                Err(PacketError::BadMetric(format!(
+                    "does not match the metric packet shape (column {column})"
+                )))
+            }
+        };
+    }
 
     if kind != PACKET_KIND_AGENT {
         return Err(PacketError::UnknownKind);
@@ -691,6 +724,149 @@ pub fn validate_agent(packet: &AgentPacket) -> Result<(), String> {
     };
     if ctx > MAX_CTX_PCT {
         return Err(format!("ctx: {ctx} is outside 0..={MAX_CTX_PCT}"));
+    }
+
+    Ok(())
+}
+
+// ---- metric packets (plugin numbers, docs/plans/2026-11-11-plugin-phase2.md) ----
+
+// the kind word of a metric packet
+pub const PACKET_KIND_METRIC: &str = "metric";
+// metric packet version; any other value is dropped
+pub const METRIC_PACKET_VERSION: u32 = 1;
+// longest plugin name and value key, in bytes (both are ASCII slugs)
+pub const MAX_PLUGIN_NAME_BYTES: usize = 32;
+pub const MAX_METRIC_KEY_BYTES: usize = 32;
+// most values in one packet
+pub const MAX_METRIC_VALUES: usize = 16;
+// largest absolute value a metric may have
+pub const MAX_METRIC_ABS: f64 = 1e9;
+// how long a packet's values stay fresh, in seconds
+pub const MIN_METRIC_TTL_S: u32 = 10;
+pub const MAX_METRIC_TTL_S: u32 = 86_400;
+
+/// One metric packet: a plugin's named numbers, sent by a data-source plugin.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricPacket {
+    pub kind: String,
+    pub v: u32,
+    // the plugin's manifest name, e.g. weather
+    pub plugin: String,
+    // how long these values stay fresh, in seconds
+    pub ttl_s: u32,
+    // key -> number, e.g. temp_c -> 12.4
+    pub values: BTreeMap<String, f64>,
+}
+
+/*
+ * checks a metric packet against the contract limits, like validate_agent does
+ * for agent packets
+ *
+ * packet: the parsed metric packet to check
+ * returns: Ok(()) or Err with a reason that starts with the field name and
+ *          never repeats a bad name
+ */
+pub fn validate_metric(packet: &MetricPacket) -> Result<(), String> {
+    if packet.kind != PACKET_KIND_METRIC {
+        return Err(format!("kind: must be {PACKET_KIND_METRIC}"));
+    }
+
+    if packet.v != METRIC_PACKET_VERSION {
+        let v = packet.v;
+        return Err(format!(
+            "v: {v} is not the supported version {METRIC_PACKET_VERSION}"
+        ));
+    }
+
+    let plugin_checked = check_slug(&packet.plugin, MAX_PLUGIN_NAME_BYTES, b'-');
+    match plugin_checked {
+        Ok(()) => {}
+        Err(rule) => return Err(format!("plugin: {rule}")),
+    }
+
+    let ttl_s = packet.ttl_s;
+    if ttl_s < MIN_METRIC_TTL_S || ttl_s > MAX_METRIC_TTL_S {
+        return Err(format!(
+            "ttl_s: {ttl_s} is outside {MIN_METRIC_TTL_S}..={MAX_METRIC_TTL_S}"
+        ));
+    }
+
+    let count = packet.values.len();
+    if count == 0 || count > MAX_METRIC_VALUES {
+        return Err(format!(
+            "values: {count} entries, must be 1 to {MAX_METRIC_VALUES}"
+        ));
+    }
+
+    for (key, value) in &packet.values {
+        // the key first: once it passes it is a safe slug to name in a reason
+        let key_checked = check_slug(key, MAX_METRIC_KEY_BYTES, b'_');
+        match key_checked {
+            Ok(()) => {}
+            Err(rule) => return Err(format!("values: a key {rule}")),
+        }
+
+        if !value.is_finite() {
+            return Err(format!("values: {key} is not a finite number"));
+        }
+        if value.abs() > MAX_METRIC_ABS {
+            return Err(format!(
+                "values: {key} is outside -{MAX_METRIC_ABS}..={MAX_METRIC_ABS}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/*
+ * checks a plugin name with the same rule validate_metric applies, for
+ * callers that read plugin names from elsewhere (the daemon's PANELS list)
+ *
+ * name: the plugin name to check
+ * returns: Ok(()) or Err with the rule (never the name)
+ */
+pub fn check_plugin_name(name: &str) -> Result<(), String> {
+    check_slug(name, MAX_PLUGIN_NAME_BYTES, b'-')
+}
+
+/*
+ * checks a name is a lowercase ASCII slug: a letter first, then letters,
+ * digits and the one separator byte, at most max_bytes long
+ *
+ * value: the name to check
+ * max_bytes: its longest allowed length
+ * separator: b'-' for plugin names, b'_' for value keys
+ * returns: Ok(()) or Err with the rule (never the value), for the caller to
+ *          prefix with the field name
+ */
+fn check_slug(value: &str, max_bytes: usize, separator: u8) -> Result<(), String> {
+    let separator_char = separator as char;
+    let rule = format!(
+        "must be 1 to {max_bytes} characters of a-z, 0-9 and {separator_char}, starting with a letter"
+    );
+
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > max_bytes {
+        return Err(rule);
+    }
+
+    if !bytes[0].is_ascii_lowercase() {
+        return Err(rule);
+    }
+
+    for b in bytes {
+        let allowed;
+        if b.is_ascii_lowercase() || b.is_ascii_digit() || *b == separator {
+            allowed = true;
+        } else {
+            allowed = false;
+        }
+
+        if !allowed {
+            return Err(rule);
+        }
     }
 
     Ok(())
@@ -1861,6 +2037,16 @@ mod tests {
             quiet: false,
             ctx: Some(42),
         };
+        let mut weather_values = BTreeMap::new();
+        weather_values.insert("rain_pct".to_string(), 40.0);
+        weather_values.insert("temp_c".to_string(), 12.4);
+        let weather = MetricView {
+            values: weather_values,
+            age_s: 42,
+            stale: false,
+        };
+        let mut metrics = BTreeMap::new();
+        metrics.insert("weather".to_string(), weather);
         let views = Views {
             stats: StatsView {
                 devices: vec![device],
@@ -1868,11 +2054,267 @@ mod tests {
             agents: AgentsView {
                 sessions: vec![session],
             },
+            metrics: metrics,
         };
         Envelope {
             v: ENVELOPE_VERSION,
             views: views,
         }
+    }
+
+    // with no plugin reporting, the line is exactly the line before metrics existed
+    #[test]
+    fn empty_metrics_are_left_out_of_the_line() {
+        let views = Views {
+            stats: StatsView {
+                devices: Vec::new(),
+            },
+            agents: AgentsView {
+                sessions: Vec::new(),
+            },
+            metrics: BTreeMap::new(),
+        };
+        let envelope = Envelope {
+            v: ENVELOPE_VERSION,
+            views: views,
+        };
+        assert_eq!(
+            serde_json::to_string(&envelope).unwrap(),
+            r#"{"v":1,"views":{"stats":{"devices":[]},"agents":{"sessions":[]}}}"#
+        );
+    }
+
+    // check_plugin_name applies the packet's plugin rule and never repeats the name
+    #[test]
+    fn check_plugin_name_matches_the_packet_rule() {
+        assert_eq!(check_plugin_name("ups-2"), Ok(()));
+        assert!(check_plugin_name("").is_err());
+        for bad in ["Ups", "ups_2", "2ups"] {
+            let reason = check_plugin_name(bad).unwrap_err();
+            assert!(!reason.contains(bad), "{reason}");
+        }
+    }
+
+    // an envelope from a daemon older than the metrics view still reads, with no metrics
+    #[test]
+    fn envelope_without_metrics_reads_as_empty() {
+        let line = r#"{"v":1,"views":{"stats":{"devices":[]},"agents":{"sessions":[]}}}"#;
+        let envelope: Envelope = serde_json::from_str(line).unwrap();
+        assert!(envelope.views.metrics.is_empty());
+    }
+
+    // ---- metric packets (plugin numbers, docs/plans/2026-11-11-plugin-phase2.md) ----
+
+    // a metric packet that respects every limit, used as the base for each test
+    fn valid_metric() -> MetricPacket {
+        let mut values = BTreeMap::new();
+        values.insert("temp_c".to_string(), 12.4);
+        values.insert("rain_pct".to_string(), 40.0);
+        MetricPacket {
+            kind: PACKET_KIND_METRIC.to_string(),
+            v: METRIC_PACKET_VERSION,
+            plugin: "weather".to_string(),
+            ttl_s: 1800,
+            values: values,
+        }
+    }
+
+    // fails the test unless validate_metric rejects the packet with a reason naming `field`
+    fn assert_metric_rejected(packet: &MetricPacket, field: &str) {
+        let checked = validate_metric(packet);
+        match checked {
+            Ok(()) => panic!("expected {field} to be rejected, but the packet passed"),
+            Err(reason) => assert!(
+                reason.starts_with(field),
+                "reason {reason:?} should start with {field}"
+            ),
+        }
+    }
+
+    // a packet with the given values, everything else valid
+    fn metric_with_values(entries: &[(&str, f64)]) -> MetricPacket {
+        let mut packet = valid_metric();
+        packet.values = BTreeMap::new();
+        for (key, value) in entries {
+            packet.values.insert(key.to_string(), *value);
+        }
+        packet
+    }
+
+    #[test]
+    fn valid_metric_packet_passes() {
+        assert_eq!(validate_metric(&valid_metric()), Ok(()));
+    }
+
+    #[test]
+    fn metric_kind_and_version_must_match() {
+        let mut packet = valid_metric();
+        packet.kind = "agent".to_string();
+        assert_metric_rejected(&packet, "kind");
+
+        let mut packet = valid_metric();
+        packet.v = 2;
+        assert_metric_rejected(&packet, "v");
+    }
+
+    #[test]
+    fn plugin_names_follow_the_slug_rule() {
+        for good in ["a", "weather", "ups-2", "a1-b2"] {
+            let mut packet = valid_metric();
+            packet.plugin = good.to_string();
+            assert_eq!(validate_metric(&packet), Ok(()), "{good}");
+        }
+        let too_long = "a".repeat(MAX_PLUGIN_NAME_BYTES + 1);
+        for bad in [
+            "",
+            "Weather",
+            "1weather",
+            "-weather",
+            "wea_ther",
+            "wea ther",
+            "wéather",
+            too_long.as_str(),
+        ] {
+            let mut packet = valid_metric();
+            packet.plugin = bad.to_string();
+            assert_metric_rejected(&packet, "plugin");
+        }
+        let longest = "a".repeat(MAX_PLUGIN_NAME_BYTES);
+        let mut packet = valid_metric();
+        packet.plugin = longest;
+        assert_eq!(validate_metric(&packet), Ok(()));
+    }
+
+    #[test]
+    fn ttl_must_be_within_its_range() {
+        for good in [MIN_METRIC_TTL_S, 1800, MAX_METRIC_TTL_S] {
+            let mut packet = valid_metric();
+            packet.ttl_s = good;
+            assert_eq!(validate_metric(&packet), Ok(()), "{good}");
+        }
+        for bad in [0, MIN_METRIC_TTL_S - 1, MAX_METRIC_TTL_S + 1] {
+            let mut packet = valid_metric();
+            packet.ttl_s = bad;
+            assert_metric_rejected(&packet, "ttl_s");
+        }
+    }
+
+    #[test]
+    fn values_count_is_one_to_sixteen() {
+        assert_metric_rejected(&metric_with_values(&[]), "values");
+
+        let mut keys: Vec<String> = Vec::new();
+        for index in 0..MAX_METRIC_VALUES + 1 {
+            keys.push(format!("k{index}"));
+        }
+        let mut entries: Vec<(&str, f64)> = Vec::new();
+        for key in &keys {
+            entries.push((key.as_str(), 1.0));
+        }
+        assert_metric_rejected(&metric_with_values(&entries), "values");
+        entries.pop();
+        assert_eq!(validate_metric(&metric_with_values(&entries)), Ok(()));
+    }
+
+    #[test]
+    fn value_keys_follow_the_slug_rule() {
+        for good in ["t", "temp_c", "rain_pct_2"] {
+            assert_eq!(
+                validate_metric(&metric_with_values(&[(good, 1.0)])),
+                Ok(()),
+                "{good}"
+            );
+        }
+        let too_long = "k".repeat(MAX_METRIC_KEY_BYTES + 1);
+        for bad in [
+            "",
+            "Temp",
+            "2temp",
+            "_temp",
+            "temp-c",
+            "temp.c",
+            too_long.as_str(),
+        ] {
+            assert_metric_rejected(&metric_with_values(&[(bad, 1.0)]), "values");
+        }
+    }
+
+    #[test]
+    fn values_must_be_finite_and_bounded() {
+        for good in [0.0, -MAX_METRIC_ABS, MAX_METRIC_ABS, 12.4, -40.0] {
+            assert_eq!(
+                validate_metric(&metric_with_values(&[("x", good)])),
+                Ok(()),
+                "{good}"
+            );
+        }
+        for bad in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            MAX_METRIC_ABS * 1.000001,
+            -MAX_METRIC_ABS * 1.000001,
+        ] {
+            assert_metric_rejected(&metric_with_values(&[("x", bad)]), "values");
+        }
+    }
+
+    // a bad key or plugin name is never repeated in the reason (it could be anything)
+    #[test]
+    fn metric_reasons_never_repeat_a_bad_name() {
+        let mut packet = valid_metric();
+        packet.plugin = "SECRET-PLUGIN".to_string();
+        let reason = validate_metric(&packet).unwrap_err();
+        assert!(!reason.contains("SECRET"), "{reason}");
+
+        let packet = metric_with_values(&[("SECRET_KEY", 1.0)]);
+        let reason = validate_metric(&packet).unwrap_err();
+        assert!(!reason.contains("SECRET"), "{reason}");
+    }
+
+    #[test]
+    fn parse_packet_reads_a_metric_packet() {
+        let bytes = br#"{"kind":"metric","v":1,"plugin":"weather","ttl_s":1800,"values":{"temp_c":12.4,"rain_pct":40}}"#;
+        let parsed = parse_packet(bytes);
+        match parsed {
+            Ok(ParsedPacket::Metric(packet)) => {
+                assert_eq!(packet, valid_metric());
+            }
+            other => panic!("expected a metric packet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_packet_refuses_a_bad_metric_shape_without_repeating_values() {
+        let shapes: [&[u8]; 4] = [
+            br#"{"kind":"metric","v":1,"plugin":"weather","ttl_s":1800,"values":{"temp_c":"SECRET"}}"#,
+            br#"{"kind":"metric","v":1,"plugin":"weather","ttl_s":-5,"values":{"t":1}}"#,
+            br#"{"kind":"metric","v":1,"plugin":"weather","values":{"t":1}}"#,
+            br#"{"kind":"metric","v":1,"plugin":"weather","ttl_s":60,"values":{"t":1e400}}"#,
+        ];
+        for bytes in shapes {
+            let parsed = parse_packet(bytes);
+            match parsed {
+                Err(PacketError::BadMetric(reason)) => {
+                    assert!(!reason.contains("SECRET"), "{reason}");
+                }
+                other => panic!("expected BadMetric, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_kinds_are_still_refused() {
+        let parsed = parse_packet(br#"{"kind":"metrics","v":1}"#);
+        assert_eq!(parsed.unwrap_err(), PacketError::UnknownKind);
+    }
+
+    #[test]
+    fn metric_packet_round_trips_through_json() {
+        let packet = valid_metric();
+        let text = serde_json::to_string(&packet).unwrap();
+        let back: MetricPacket = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, packet);
     }
 
     #[test]

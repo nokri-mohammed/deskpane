@@ -42,6 +42,10 @@ daemon/src/
                       insert_agent (caps, IP ownership, per-key reorder guard, pending
                       needs_you keys per subagent, eviction -> AgentOutcome), forget_agents,
                       agent_session (running_s, state_s, silent_s, quiet)
+  metric_table.rs     MetricTable of MetricEntry (plugin metrics, Phase 2 slice 1), pure
+                      insert_metric (caps: plugins, per source; IP ownership while the
+                      values are fresh -> MetricOutcome), forget_metrics (ttl + grace),
+                      metric_views (age_s, stale) for the envelope's views.metrics
   main.rs             project logic: bind_error_message, is_local_owner, store_report, store_agent,
                       udp_server (kind dispatch, replies for reports only),
                       handle_agent_packet + agent_outcome_line (refusals through the log
