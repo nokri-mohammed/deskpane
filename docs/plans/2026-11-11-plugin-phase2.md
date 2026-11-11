@@ -58,10 +58,22 @@ never echoed.
 
 **Contract and mirror:** `MetricPacket`, `validate_metric`, the limit constants and `MetricsView` in
 `deskpane-contract`; `PacketKind` gains `metric`; `pi/deskpane_contract.py` parses `views.metrics`.
-A second golden fixture `pi/tests/fixtures/envelope_v1_metrics.json`, checked from both sides like
-the existing one.
+The existing golden fixture `pi/tests/fixtures/envelope_v1.json` gains a `metrics` view and stays
+checked from both sides (built: one fixture is simpler than two, and the preview mock test only
+requires the mock to send a subset of the fixture's keys). Built with one addition: at most 8
+plugins per source IP, the same per-source idea the agent table uses.
 
 **SDK:** `deskpane_sdk::send_metrics(daemon, plugin, ttl_s, values)`.
+
+**Security review (2026-11-11), built into the slice:** MEDIUM-1, one packet with `ttl_s` 86400
+could hold a plugin name (or, with spoofed IPs, the whole table) for a day. Fixed: the daemon
+accepts metric packets only for plugins listed in `PANELS` (the same setting as D6, read from
+`/etc/deskpane/env`), and an owner holds a name for at most 15 minutes of silence. LOW-2 (a
+takeover log line was not rate limited), LOW-3 (`parse_metrics` trusted names) and LOW-4 (a huge
+int could raise) are fixed; LOW-5 got a contract test that an empty metrics view is left out.
+LOW-1 (evict stale entries when full) is moot: with at most 16 turned-on names the 16-slot table
+cannot fill with anything else. Residual risk, accepted for v1 and recorded in `docs/SECURITY.md`:
+no packet authentication, so a spoofed owner IP can change a turned-on plugin's numbers (T-006).
 
 **Tests:** every validation rule at its edge (17 values, a 33-char key, NaN, infinity, 1e9 + 1,
 ttl 9 and 86401, bad plugin names), table cap, IP ownership, expiry, envelope round trip, the

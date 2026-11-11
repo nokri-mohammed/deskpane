@@ -225,8 +225,9 @@ and exits (exit 10 and 12 come only from `--once`):
 
 The same port also takes a second kind of packet: the status of one AI agent session (Claude
 Code, sent by its hooks through `deskpane agent`). A packet with no `kind` is a stats report, as
-above, so every old reporter keeps working. A packet with `"kind": "agent"` is an agent packet.
-Any other `kind` is dropped, and the log line does not repeat the value.
+above, so every old reporter keeps working. A packet with `"kind": "agent"` is an agent packet,
+and `"kind": "metric"` is a plugin's metric packet (below). Any other `kind` is dropped, and the
+log line does not repeat the value.
 
 ```json
 {"kind":"agent","v":1,"sid":"3f9a0c41b2d7","device_id":"dp-3f9a0c41","project":"my-project","state":"needs_you","doing":"allow Bash?","t":1794152400123}
@@ -303,6 +304,59 @@ line each.
 An old daemon (before the agent view) reads an agent packet as a broken report and drops it with
 one log line. Upgrade the Pi first.
 
+## Metric packets (plugins)
+
+A data-source plugin sends its own numbers with `"kind": "metric"`, and its declarative panel
+shows them (plugin system Phase 2, `docs/plans/2026-11-11-plugin-phase2.md`). Plugins written in
+Rust send them with `deskpane_sdk::send_metrics`, which checks the packet first.
+
+```json
+{"kind":"metric","v":1,"plugin":"weather","ttl_s":1800,"values":{"temp_c":12.4,"rain_pct":40}}
+```
+
+| Field | Type | Rule |
+|---|---|---|
+| `kind` | string | Exactly `"metric"`. |
+| `v` | integer | Metric packet version, `1`. Any other value drops the packet. |
+| `plugin` | string | The plugin's manifest name: 1 to 32 characters of `a-z`, `0-9` and `-`, starting with a letter. |
+| `ttl_s` | integer | How long the values stay fresh, 10 to 86400 seconds. After that the panel shows its missing text. A source that sends every 10 minutes sets about 1800. |
+| `values` | object | 1 to 16 entries. Each key is 1 to 32 characters of `a-z`, `0-9` and `_`, starting with a letter. Each value is a finite number from -1e9 to 1e9. Numbers only: no text, no booleans, no null. |
+
+Limits (`validate_metric` in `contract/src/lib.rs`): a packet that breaks a rule is dropped as a
+whole, and the log line names the field without repeating a bad name. An unknown field is
+ignored. A panel names a value as `<plugin>.<key>`, for example `weather.temp_c`.
+
+### Daemon rules for metric packets
+
+| Situation | Result |
+|---|---|
+| The plugin is not turned on (not listed in `PANELS` in `/etc/deskpane/env`) | dropped |
+| A packet from the IP that owns the plugin | stored; it replaces all of the plugin's values |
+| The plugin belongs to another IP that still holds it | dropped |
+| The plugin belongs to another IP that no longer holds it | stored, the sender is now the owner |
+| A new plugin, and that IP already owns 8 plugins | dropped |
+| A new plugin, and the table has 16 plugins | dropped |
+
+An owner holds its plugin while its values are fresh, but **for at most 15 minutes of silence**
+(`METRIC_OWNER_HOLD`), whatever `ttl_s` it sent. So one packet with `ttl_s` 86400 cannot hold a
+name for a day; the values themselves still count as fresh for the whole `ttl_s`. If the
+plugin's machine gets a new IP address (a DHCP renewal), it takes its plugin back within those
+15 minutes.
+
+The daemon reads `PANELS` once at start (restart it after a change) and logs the plugins it
+turned on, and any item it skipped. At most 16 names count. The numbers are
+`MAX_METRIC_PLUGINS` (16) and `MAX_METRICS_PER_SOURCE` (8) in `daemon/src/main.rs`. A plugin is
+forgotten 5 minutes (`METRIC_FORGET_GRACE`) after its values went stale; until then the
+dashboard sees it as stale. A key that appears twice in `values` counts once (the last one wins).
+
+**Ownership is by source IP and v1 has no authentication**, the same as for reports and agent
+packets: a machine on your network that fakes the owner's IP address can change a plugin's
+numbers. Never forward UDP port 8765 from the internet. Authenticated packets are T-006.
+
+**Metric packets get no reply**, like agent packets. A new plugin gets one log line, a forgotten
+one gets one line, and refusals go through the same per-source log limiter. An old daemon (before
+v0.1.0-beta.6) drops a metric packet as an unknown kind with one log line.
+
 ## The socket line
 
 The daemon relays what it knows to the dashboard over a Unix domain socket (see "How it works"
@@ -318,6 +372,23 @@ envelope with one key for each view:
 | `v` | Envelope version, `1`. |
 | `views.stats.devices` | The list of `DeviceStatus`: the report fields (with `battery_pct` and `charging` only when the report had them) plus `"online": true` or `false` and `"local": true` or `false`. `local` is `true` when the device's owner IP is a loopback address (the Pi's own reporter); the overview draws that device's battery. Same content as the bare array of v0.1.x lines, plus the new keys. |
 | `views.agents.sessions` | The list of agent sessions, below. Empty when none. |
+| `views.metrics` | Plugin name to its numbers, below. **Left out of the line while no plugin reports**, so a Pi without plugins sends exactly the line it sent before. |
+
+Each plugin under `views.metrics`:
+
+```json
+"metrics":{"weather":{"values":{"rain_pct":40.0,"temp_c":12.4},"age_s":42,"stale":false}}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `values` | object | The latest values the plugin sent, key to number. |
+| `age_s` | integer | Seconds since the daemon last heard from the plugin. |
+| `stale` | bool | `true` once `age_s` reaches the packet's `ttl_s`. The panel then shows its missing text. |
+
+An old dashboard ignores `views.metrics`. The Python side reads it with
+`deskpane_contract.parse_metrics`, which drops anything that is not a finite number and treats an
+entry with no usable age as stale.
 
 Each session:
 

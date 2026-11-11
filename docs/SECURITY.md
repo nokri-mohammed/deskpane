@@ -119,7 +119,20 @@ named:
   never the core pages or other plugins. A total draw-cost budget per frame.
 - Every plugin-sourced number (including the custom-metric packet kind) passes the contract's
   finite-and-bounds check (`check_range`), so NaN, Inf and absurd magnitudes never reach the
-  formatter or the geometry math.
+  formatter or the geometry math. Built in Phase 2 slice 1: `validate_metric` (finite, at most 1e9
+  either way) in the daemon, and `deskpane_contract.parse_metrics` applies the same bound, name
+  rules and caps again on the dashboard side.
+
+## Metric packets: who can set a plugin's numbers (Phase 2 slice 1 review)
+
+- The daemon accepts metric packets only for plugins turned on in `PANELS`. A name that is not
+  turned on can never be stored, so nobody can squat a name or fill the 16-plugin table.
+- An owner holds a plugin name for at most 15 minutes of silence, whatever `ttl_s` it sent, so one
+  packet cannot lock a plugin for a day.
+- **Accepted v1 residual risk:** there is no packet authentication. Anyone who can send UDP to port
+  8765 with a faked source IP can change the numbers of a plugin that is turned on, exactly as they
+  can change a device report today. Never expose 8765 beyond the LAN. Closed only by T-006
+  (authenticated UDP).
 - The declarative renderer applies the same control-character and Unicode-format-character rejection
   the data plane already uses (`check_text`, `check_no_format_chars`) plus a hard length cap on
   every string it draws, bound or literal (defeats overflowing, bidi-spoofed and glyph-bomb text).

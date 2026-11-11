@@ -35,10 +35,12 @@
 //! }
 //! ```
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::net::UdpSocket;
 
+use deskpane_contract::{validate_metric, MetricPacket, METRIC_PACKET_VERSION, PACKET_KIND_METRIC};
 use serde::Serialize;
 
 // the wire contract, re-exported so a plugin depends on one crate and gets the
@@ -142,6 +144,45 @@ pub fn send_packet<T: Serialize>(target: &str, packet: &T) -> Result<(), String>
     }
 }
 
+/*
+ * sends one metric packet: the plugin's named numbers, which its declarative
+ * panel shows. The packet is checked against the contract limits first, so a
+ * mistake shows up here instead of being dropped silently by the daemon.
+ *
+ * target: the daemon address, "host:port"
+ * plugin: the plugin's manifest name, e.g. "weather"
+ * ttl_s: how long the values stay fresh, in seconds (10 to 86400)
+ * values: (key, number) pairs, 1 to 16 of them, e.g. [("temp_c", 12.4)]
+ * returns: Ok(()) once sent, or Err with the reason (never panics)
+ */
+pub fn send_metrics(
+    target: &str,
+    plugin: &str,
+    ttl_s: u32,
+    values: &[(&str, f64)],
+) -> Result<(), String> {
+    let mut map = BTreeMap::new();
+    for (key, value) in values {
+        map.insert(key.to_string(), *value);
+    }
+
+    let packet = MetricPacket {
+        kind: PACKET_KIND_METRIC.to_string(),
+        v: METRIC_PACKET_VERSION,
+        plugin: plugin.to_string(),
+        ttl_s: ttl_s,
+        values: map,
+    };
+
+    let checked = validate_metric(&packet);
+    match checked {
+        Ok(()) => {}
+        Err(reason) => return Err(format!("metric packet: {reason}")),
+    }
+
+    send_packet(target, &packet)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +258,56 @@ mod tests {
         let text = String::from_utf8(buf[..got].to_vec()).unwrap();
         assert!(text.contains("\"device_id\":\"dp-test\""));
         assert!(text.contains("\"cpu_pct\":1.0"));
+    }
+
+    // send_metrics builds a metric packet the daemon parses and accepts
+    #[test]
+    fn send_metrics_sends_a_valid_metric_packet() {
+        let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let sent = send_metrics(
+            &addr,
+            "weather",
+            1800,
+            &[("temp_c", 12.4), ("rain_pct", 40.0)],
+        );
+        assert_eq!(sent, Ok(()));
+
+        let mut buf = [0u8; 512];
+        let got = listener.recv(&mut buf).unwrap();
+        let parsed = contract::parse_packet(&buf[..got]);
+        match parsed {
+            Ok(contract::ParsedPacket::Metric(packet)) => {
+                assert_eq!(contract::validate_metric(&packet), Ok(()));
+                assert_eq!(packet.plugin, "weather");
+                assert_eq!(packet.ttl_s, 1800);
+                assert_eq!(packet.values["temp_c"], 12.4);
+                assert_eq!(packet.values["rain_pct"], 40.0);
+            }
+            other => panic!("expected a metric packet, got {other:?}"),
+        }
+    }
+
+    // a packet the daemon would refuse is an error here, and nothing is sent
+    #[test]
+    fn send_metrics_refuses_an_invalid_packet_without_sending() {
+        let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
+        listener
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let bad_name = send_metrics(&addr, "Weather", 1800, &[("temp_c", 12.4)]);
+        assert!(bad_name.unwrap_err().starts_with("metric packet: plugin"));
+        let no_values = send_metrics(&addr, "weather", 1800, &[]);
+        assert!(no_values.unwrap_err().starts_with("metric packet: values"));
+        let not_finite = send_metrics(&addr, "weather", 1800, &[("temp_c", f64::NAN)]);
+        assert!(not_finite.unwrap_err().starts_with("metric packet: values"));
+
+        let mut buf = [0u8; 64];
+        assert!(
+            listener.recv(&mut buf).is_err(),
+            "nothing should have been sent"
+        );
     }
 }

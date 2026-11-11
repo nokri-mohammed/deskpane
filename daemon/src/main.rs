@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
@@ -8,11 +9,15 @@ use daemon::agent_table::{
     agent_session, forget_agents, insert_agent, AgentLimits, AgentOutcome, AgentTable,
 };
 use daemon::contract::{
-    build_reply, parse_packet, validate, validate_agent, AgentPacket, AgentSession, AgentsView,
-    DeviceStatus, Envelope, PacketError, ParsedPacket, Reply, Report, StatsView, Views,
-    ENVELOPE_VERSION,
+    build_reply, parse_packet, validate, validate_agent, validate_metric, AgentPacket,
+    AgentSession, AgentsView, DeviceStatus, Envelope, MetricPacket, PacketError, ParsedPacket,
+    Reply, Report, StatsView, Views, ENVELOPE_VERSION,
 };
 use daemon::device_table::{forget_silent, insert_report, DeviceTable, InsertOutcome};
+use daemon::metric_table::{
+    forget_metrics, insert_metric, metric_views, parse_plugin_list, MetricLimits, MetricOutcome,
+    MetricTable,
+};
 use daemon::services::broadcaster::Broadcaster;
 use daemon::services::reply_limiter::ReplyLimiter;
 use daemon::services::udp::UdpSocketServer;
@@ -47,20 +52,38 @@ const MAX_PENDING_PER_SESSION: usize = 8;
 const AGENT_QUIET_AFTER: Duration = Duration::from_secs(600);
 // a session silent for 4 h is forgotten, whatever its state
 const AGENT_FORGET_AFTER: Duration = Duration::from_secs(4 * 3600);
+// plugin metrics: at most 16 plugins, at most 8 per source IP
+const MAX_METRIC_PLUGINS: usize = 16;
+const MAX_METRICS_PER_SOURCE: usize = 8;
+// a plugin stays (shown as stale) for 5 min past its ttl, then it is forgotten
+const METRIC_FORGET_GRACE: Duration = Duration::from_secs(300);
+// an owner holds a plugin name for at most 15 min of silence, whatever its ttl
+const METRIC_OWNER_HOLD: Duration = Duration::from_secs(900);
 
-/// Everything the daemon keeps in memory: the devices and the agent sessions.
+/// Everything the daemon keeps in memory: devices, agent sessions, plugin metrics.
 struct Tables {
     devices: DeviceTable,
     agents: AgentTable,
+    metrics: MetricTable,
+    // the plugins turned on in PANELS; metric packets for any other name are dropped
+    enabled_plugins: BTreeSet<String>,
 }
 
 type SharedState = Arc<RwLock<Tables>>;
 
-// empty tables, shared between the UDP server and the broadcast tick
+// empty tables with no plugin turned on
+#[cfg(test)]
 fn new_state() -> SharedState {
+    new_state_with(BTreeSet::new())
+}
+
+// empty tables, shared between the UDP server and the broadcast tick
+fn new_state_with(enabled_plugins: BTreeSet<String>) -> SharedState {
     let tables = Tables {
         devices: HashMap::new(),
         agents: AgentTable::new(),
+        metrics: MetricTable::new(),
+        enabled_plugins: enabled_plugins,
     };
     Arc::new(RwLock::new(tables))
 }
@@ -223,6 +246,91 @@ async fn handle_agent_packet(
     }
 }
 
+/*
+ * checks and stores one metric packet. Metric packets never get a reply. A
+ * new or taken-over plugin always gets a log line (the table caps bound
+ * them); refusals go through log_limiter
+ *
+ * packet: the parsed metric packet
+ * peer: the address it came from
+ */
+async fn handle_metric_packet(
+    state: &SharedState,
+    packet: MetricPacket,
+    peer: SocketAddr,
+    log_limiter: &mut ReplyLimiter,
+) {
+    let now = Instant::now();
+    let source = reply_source(peer);
+
+    // drop packets that break the contract limits (bad names, numbers, ttl)
+    let checked = validate_metric(&packet);
+    match checked {
+        Ok(()) => {}
+        Err(reason) => {
+            if log_limiter.allow(source, now) {
+                eprintln!("daemon: rejected metric packet from {peer}: {reason}");
+            }
+            return;
+        }
+    }
+
+    // store it under the table policy, then release the lock before logging
+    // (the plugin name passed validate_metric, so it is safe to log)
+    let plugin = packet.plugin.clone();
+    let limits = MetricLimits {
+        max_plugins: MAX_METRIC_PLUGINS,
+        max_per_source: MAX_METRICS_PER_SOURCE,
+        max_owner_hold: METRIC_OWNER_HOLD,
+    };
+    let mut guard = state.write().await;
+    // split the borrow: the metric table changes, the turned-on list is only read
+    let tables = &mut *guard;
+    let outcome = insert_metric(
+        &mut tables.metrics,
+        packet,
+        source,
+        now,
+        limits,
+        &tables.enabled_plugins,
+    );
+    drop(guard);
+
+    // a new plugin always gets a line (only turned-on names can be new, and
+    // each only once until it is forgotten); everything else is limited
+    match outcome {
+        MetricOutcome::Created => eprintln!("daemon: plugin {plugin} now reporting from {source}"),
+        MetricOutcome::TakenOver { previous } => {
+            if log_limiter.allow(source, now) {
+                eprintln!("daemon: plugin {plugin} now reporting from {source} (was {previous})");
+            }
+        }
+        MetricOutcome::NotEnabled => {
+            if log_limiter.allow(source, now) {
+                eprintln!("daemon: plugin {plugin} from {source} dropped: not turned on in PANELS");
+            }
+        }
+        MetricOutcome::Stored => {}
+        MetricOutcome::NotOwner { owner } => {
+            if log_limiter.allow(source, now) {
+                eprintln!("daemon: plugin {plugin} from {source} dropped: owned by {owner}");
+            }
+        }
+        MetricOutcome::SourceFull => {
+            if log_limiter.allow(source, now) {
+                eprintln!(
+                    "daemon: {source} already owns {MAX_METRICS_PER_SOURCE} plugins, dropped {plugin}"
+                );
+            }
+        }
+        MetricOutcome::TableFull => {
+            if log_limiter.allow(source, now) {
+                eprintln!("daemon: metric table full, dropped plugin {plugin} from {source}");
+            }
+        }
+    }
+}
+
 /// Whether and how one agent outcome is logged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentLogLine {
@@ -296,6 +404,10 @@ async fn udp_server(mut udp_socket_server: UdpSocketServer, state: SharedState) 
                 handle_agent_packet(&state, agent, peer, &mut log_limiter).await;
                 continue;
             }
+            Ok(ParsedPacket::Metric(metric)) => {
+                handle_metric_packet(&state, metric, peer, &mut log_limiter).await;
+                continue;
+            }
             // the reason names only a missing field or a column, never a value
             Err(PacketError::BadReport(reason)) => {
                 if log_limiter.allow(reply_source(peer), Instant::now()) {
@@ -306,6 +418,12 @@ async fn udp_server(mut udp_socket_server: UdpSocketServer, state: SharedState) 
             Err(PacketError::BadAgent(reason)) => {
                 if log_limiter.allow(reply_source(peer), Instant::now()) {
                     eprintln!("daemon: bad agent packet from {peer}: {reason}");
+                }
+                continue;
+            }
+            Err(PacketError::BadMetric(reason)) => {
+                if log_limiter.allow(reply_source(peer), Instant::now()) {
+                    eprintln!("daemon: bad metric packet from {peer}: {reason}");
                 }
                 continue;
             }
@@ -415,9 +533,26 @@ async fn forget_silent_agents(state: &SharedState) {
 }
 
 /*
- * snapshot both tables (online/offline and the agent fields computed) and
- * broadcast them once, as one envelope line, to every socket subscriber:
- * {"v":1,"views":{"stats":{"devices":[..]},"agents":{"sessions":[..]}}}
+ * removes plugins silent longer than their ttl plus METRIC_FORGET_GRACE, and
+ * logs each one. Runs on the same tick as forget_silent_devices.
+ */
+async fn forget_silent_metrics(state: &SharedState) {
+    let mut tables = state.write().await;
+    let forgotten = forget_metrics(&mut tables.metrics, Instant::now(), METRIC_FORGET_GRACE);
+    // release the write lock before logging
+    drop(tables);
+
+    for plugin in &forgotten {
+        eprintln!("daemon: forgot plugin {plugin} after its data expired");
+    }
+}
+
+/*
+ * snapshot the tables (online/offline, the agent fields and the metric ages
+ * computed) and broadcast them once, as one envelope line, to every socket
+ * subscriber:
+ * {"v":1,"views":{"stats":{"devices":[..]},"agents":{"sessions":[..]},"metrics":{..}}}
+ * metrics is left out while no plugin reports
  */
 async fn broadcast_statuses(state: &SharedState, broadcaster: &Broadcaster) {
     // read-lock the tables to look at every device and session
@@ -458,6 +593,9 @@ async fn broadcast_statuses(state: &SharedState, broadcaster: &Broadcaster) {
         let session = agent_session(sid, entry, &label, now, AGENT_QUIET_AFTER);
         sessions.push(session);
     }
+
+    // each plugin's values, with their age and staleness
+    let metrics = metric_views(&snapshot.metrics, now);
     // release the read lock early, before the JSON/broadcast work below
     drop(snapshot);
 
@@ -466,6 +604,7 @@ async fn broadcast_statuses(state: &SharedState, broadcaster: &Broadcaster) {
         views: Views {
             stats: StatsView { devices: statuses },
             agents: AgentsView { sessions: sessions },
+            metrics: metrics,
         },
     };
     broadcaster.send_json(&envelope);
@@ -522,7 +661,28 @@ async fn main() {
 
     let protocol = Protocol::from_env();
 
-    let state = new_state();
+    // the plugins turned on in PANELS (also the dashboard's list of plugin pages)
+    let panels_read = env::var("PANELS");
+    let panels = match panels_read {
+        Ok(v) => v,
+        Err(_) => String::new(),
+    };
+    let (enabled_plugins, skipped) = parse_plugin_list(&panels, MAX_METRIC_PLUGINS);
+    for item in &skipped {
+        eprintln!("daemon: PANELS: skipped {item:?} (not a plugin name, or more than {MAX_METRIC_PLUGINS})");
+    }
+    if enabled_plugins.is_empty() {
+        eprintln!("daemon: no plugin turned on (PANELS is empty): metric packets are dropped");
+    } else {
+        let mut listed: Vec<String> = Vec::new();
+        for name in &enabled_plugins {
+            listed.push(name.clone());
+        }
+        let joined = listed.join(", ");
+        eprintln!("daemon: plugins turned on: {joined}");
+    }
+
+    let state = new_state_with(enabled_plugins);
     let broadcaster = Broadcaster::new(16);
 
     match protocol {
@@ -558,6 +718,7 @@ async fn main() {
                         interval.tick().await;
                         forget_silent_devices(&state).await;
                         forget_silent_agents(&state).await;
+                        forget_silent_metrics(&state).await;
                         broadcast_statuses(&state, &broadcaster).await;
                     }
                 },
@@ -699,9 +860,20 @@ mod tests {
 
     // the same, and also hands back the shared tables for envelope checks
     async fn start_daemon_with_state() -> (SocketAddr, tokio::task::JoinHandle<()>, SharedState) {
+        start_daemon_with_plugins(&[]).await
+    }
+
+    // the same, with the given plugins turned on (PANELS)
+    async fn start_daemon_with_plugins(
+        plugins: &[&str],
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>, SharedState) {
         let server = UdpSocketServer::try_new("127.0.0.1:0").await.unwrap();
         let addr = server.local_addr().unwrap();
-        let state = new_state();
+        let mut enabled = BTreeSet::new();
+        for name in plugins {
+            enabled.insert(name.to_string());
+        }
+        let state = new_state_with(enabled);
         let task = tokio::spawn(udp_server(server, state.clone()));
         (addr, task, state)
     }
@@ -917,6 +1089,116 @@ mod tests {
         assert_eq!(session["silent_s"], 0);
         assert!(session["ctx"].is_null());
         assert_eq!(session["label"], "");
+    }
+
+    // a valid metric packet's bytes for the given plugin and temperature
+    fn metric_bytes(plugin: &str, temp_c: f64) -> Vec<u8> {
+        format!(
+            r#"{{"kind":"metric","v":1,"plugin":"{plugin}","ttl_s":1800,"values":{{"temp_c":{temp_c},"rain_pct":40}}}}"#
+        )
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn metric_packet_appears_in_the_envelope() {
+        let (daemon, task, state) = start_daemon_with_plugins(&["weather"]).await;
+        let socket = reporter_socket("127.0.0.1");
+
+        tokio::task::spawn_blocking(move || {
+            socket
+                .send_to(&metric_bytes("weather", 12.4), daemon)
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        })
+        .await
+        .unwrap();
+        task.abort();
+
+        let line = envelope_line(&state).await;
+        let weather = &line["views"]["metrics"]["weather"];
+        assert_eq!(weather["values"]["temp_c"], 12.4);
+        assert_eq!(weather["values"]["rain_pct"], 40.0);
+        assert_eq!(weather["age_s"], 0);
+        assert_eq!(weather["stale"], false);
+    }
+
+    #[tokio::test]
+    async fn a_second_source_cannot_overwrite_a_fresh_plugin() {
+        let (daemon, task, state) = start_daemon_with_plugins(&["weather"]).await;
+        let first = reporter_socket("127.0.0.1");
+        let second = reporter_socket("127.0.0.2");
+
+        tokio::task::spawn_blocking(move || {
+            first
+                .send_to(&metric_bytes("weather", 12.4), daemon)
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            second
+                .send_to(&metric_bytes("weather", 99.0), daemon)
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        })
+        .await
+        .unwrap();
+        task.abort();
+
+        let line = envelope_line(&state).await;
+        assert_eq!(
+            line["views"]["metrics"]["weather"]["values"]["temp_c"],
+            12.4
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plugin_not_turned_on_is_not_stored() {
+        let (daemon, task, state) = start_daemon_with_plugins(&["weather"]).await;
+        let socket = reporter_socket("127.0.0.1");
+
+        tokio::task::spawn_blocking(move || {
+            socket
+                .send_to(&metric_bytes("squatter", 1.0), daemon)
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        })
+        .await
+        .unwrap();
+        task.abort();
+
+        // nothing stored, so the line has no metrics view at all
+        let line = envelope_line(&state).await;
+        assert!(line["views"].get("metrics").is_none());
+    }
+
+    #[tokio::test]
+    async fn metric_packets_get_no_reply_and_bad_ones_are_not_stored() {
+        let (daemon, task, state) = start_daemon_with_plugins(&["weather"]).await;
+        let socket = reporter_socket("127.0.0.1");
+
+        let reply = tokio::task::spawn_blocking(move || {
+            // a valid one, one that fails validate_metric, one with a bad shape
+            socket
+                .send_to(&metric_bytes("weather", 12.4), daemon)
+                .unwrap();
+            socket
+                .send_to(&metric_bytes("Bad-Name", 1.0), daemon)
+                .unwrap();
+            socket
+                .send_to(
+                    br#"{"kind":"metric","v":1,"plugin":"ups","values":{}}"#,
+                    daemon,
+                )
+                .unwrap();
+            read_reply(&socket)
+        })
+        .await
+        .unwrap();
+        task.abort();
+
+        assert!(reply.is_none());
+        let line = envelope_line(&state).await;
+        let metrics = line["views"]["metrics"].as_object().unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert!(metrics.contains_key("weather"));
     }
 
     #[tokio::test]
