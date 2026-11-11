@@ -31,6 +31,26 @@
           "jsonpath": "$.package[?(@.name.value==='reporter')].version"
         },
         {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='deskpane-contract')].version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='deskpane-sdk')].version"
+        },
+        {
+          "type": "toml",
+          "path": "plugins/example-report/source/Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='deskpane-contract')].version"
+        },
+        {
+          "type": "toml",
+          "path": "plugins/example-report/source/Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='deskpane-sdk')].version"
+        },
+        {
           "type": "generic",
           "path": "docs/INSTALL.md"
         }

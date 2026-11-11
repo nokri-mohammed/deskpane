@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "deskpane-contract"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "deskpane-sdk"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "deskpane-contract",
  "serde",
